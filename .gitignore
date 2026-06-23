@@ -8,6 +8,15 @@ dropdown_cache.json
 extent_cache.json
 local_proxy_response.json
 
+# SQLite database (Phase 2)
+bhunaksha.db
+
+# Downloaded PDF reports (Phase 2)
+static/reports/
+
+# Python test cache
+.pytest_cache/
+
 # IDE / OS files
 .vscode/
 .idea/

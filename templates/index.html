@@ -171,29 +171,97 @@
                 </div>
             </div>
 
-            <!-- Metadata details panel -->
-            <div class="form-section">
-                <h3 class="section-title"><i class="fa fa-info-circle"></i> Selection Details</h3>
-                <div class="panel-card" style="gap: 0.5rem;">
+            <!-- Parcel Details Panel -->
+            <div class="form-section" id="panel-parcel-details" style="display:none;">
+                <h3 class="section-title"><i class="fa fa-file-text"></i> Parcel Details</h3>
+                <div class="panel-card" style="gap: 0.35rem;">
                     <div class="detail-item">
-                        <span class="detail-label">Plot No:</span>
+                        <span class="detail-label">District</span>
+                        <span class="detail-value" id="val-district">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Circle</span>
+                        <span class="detail-value" id="val-circle">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Mouza</span>
+                        <span class="detail-value" id="val-mouza">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Sheet No</span>
+                        <span class="detail-value" id="val-sheet-no">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Plot No</span>
                         <span class="detail-value" id="val-plot-no">--</span>
                     </div>
                     <div class="detail-item">
-                        <span class="detail-label">Plot ID:</span>
-                        <span class="detail-value" id="val-plot-id">--</span>
+                        <span class="detail-label">Khata No</span>
+                        <span class="detail-value" id="val-khata">--</span>
                     </div>
                     <div class="detail-item">
-                        <span class="detail-label">PNIU Code:</span>
+                        <span class="detail-label">PNIU</span>
                         <span class="detail-value" id="val-pniu">--</span>
                     </div>
+                    <div class="detail-item" style="grid-template-columns: 80px 1fr; align-items: start;">
+                        <span class="detail-label">Owners</span>
+                        <span class="detail-value" id="val-owners" style="white-space: pre-line;">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Map Measurement Panel -->
+            <div class="form-section" id="panel-measurements" style="display:none;">
+                <h3 class="section-title"><i class="fa fa-arrows-alt"></i> Map Measurements</h3>
+                <div class="panel-card" style="gap: 0.35rem;">
                     <div class="detail-item">
-                        <span class="detail-label">Latitude:</span>
-                        <span class="detail-value" id="val-lat">--</span>
+                        <span class="detail-label">Area</span>
+                        <span class="detail-value" id="val-area-acres">--</span>
                     </div>
                     <div class="detail-item">
-                        <span class="detail-label">Longitude:</span>
-                        <span class="detail-value" id="val-lon">--</span>
+                        <span class="detail-label"></span>
+                        <span class="detail-value" id="val-area-ha" style="color:var(--text-secondary);"></span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label"></span>
+                        <span class="detail-value" id="val-area-sqm" style="color:var(--text-secondary);"></span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Perimeter</span>
+                        <span class="detail-value" id="val-perimeter">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Longest Side</span>
+                        <span class="detail-value" id="val-longest-side">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Shortest Side</span>
+                        <span class="detail-value" id="val-shortest-side">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Vertices</span>
+                        <span class="detail-value" id="val-vertex-count">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Documents & Export Panel -->
+            <div class="form-section" id="panel-documents" style="display:none;">
+                <h3 class="section-title"><i class="fa fa-file-pdf-o"></i> Documents & Export</h3>
+                <div class="panel-card" style="gap: 0.5rem;">
+                    <button class="btn-primary btn-doc btn-report" id="btn-view-report" disabled>
+                        <i class="fa fa-eye"></i> View LDM Report
+                    </button>
+                    <button class="btn-primary btn-doc btn-report" id="btn-download-report" disabled>
+                        <i class="fa fa-download"></i> Download LDM Report
+                    </button>
+                    <div style="display:flex; gap:0.5rem;">
+                        <button class="btn-secondary btn-export" id="btn-export-geojson" disabled>
+                            <i class="fa fa-globe"></i> GeoJSON
+                        </button>
+                        <button class="btn-secondary btn-export" id="btn-export-csv" disabled>
+                            <i class="fa fa-table"></i> CSV
+                        </button>
                     </div>
                 </div>
             </div>
@@ -220,6 +288,17 @@
         <div class="loading-overlay" id="loading">
             <div class="spinner"></div>
             <div class="loading-text" id="loading-text">Loading Cadastral Layers...</div>
+        </div>
+
+        <!-- PDF Viewer Modal -->
+        <div class="modal-overlay" id="pdf-modal" style="display:none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <span class="modal-title">LDM Report</span>
+                    <button class="modal-close" id="btn-modal-close">&times;</button>
+                </div>
+                <iframe id="pdf-viewer" class="modal-iframe" src=""></iframe>
+            </div>
         </div>
     </div>
 
