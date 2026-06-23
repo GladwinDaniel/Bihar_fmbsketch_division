@@ -1,38 +1,108 @@
+// Bihar Cadastral Map & Satellite Dashboard GIS Logic
+
 let map;
 let plotLyr;
 let selPlotLyr;
-let parcelVectorLayer;
 let vectorSource;
+let vectorLayer;
+let currentParcelData = null;
 let currentGisCode = "";
 let currentLevels = "";
 let currentExtent = null;
-let currentParcelData = null;
-let currentAdminNames = { district: "", subdivision: "", circle: "", mouza: "", sheet: "" };
-const stateCode = "10";
+const stateCode = "10"; // Bihar State Code
 
+// Alignment offsets (visual nudge) in degrees
 let offsetX = 0.0;
 let offsetY = 0.0;
 const metersPerDegreeLat = 110800.0;
 const metersPerDegreeLon = 100890.0;
 
-$(document).ready(function () {
+$(document).ready(function() {
     initMap();
     initDropdowns();
     setupEventListeners();
-    setupParcelEventListeners();
 });
 
+const vectorStyleFunction = function(feature) {
+    const styles = [];
+    const geom = feature.getGeometry();
+    if (!geom) return styles;
+    
+    // 1. Polygon Outline & Fill
+    styles.push(new ol.style.Style({
+        stroke: new ol.style.Stroke({
+            color: '#ff3366',
+            width: 3
+        }),
+        fill: new ol.style.Fill({
+            color: 'rgba(255, 51, 102, 0.15)'
+        })
+    }));
+    
+    const coordinates = geom.getCoordinates()[0];
+    if (coordinates) {
+        // 2. Vertex markers (small circles at points)
+        coordinates.forEach((coord, index) => {
+            if (index === coordinates.length - 1) return; // skip closing coord
+            styles.push(new ol.style.Style({
+                geometry: new ol.geom.Point(coord),
+                image: new ol.style.Circle({
+                    radius: 5,
+                    fill: new ol.style.Fill({
+                        color: '#ffffff'
+                    }),
+                    stroke: new ol.style.Stroke({
+                        color: '#ff3366',
+                        width: 2
+                    })
+                })
+            }));
+        });
+        
+        // 3. Side length labels (midpoints)
+        const segmentLengths = feature.get('segment_lengths');
+        if (segmentLengths) {
+            for (let i = 0; i < coordinates.length - 1; i++) {
+                const p1 = coordinates[i];
+                const p2 = coordinates[i+1];
+                
+                const midX = (p1[0] + p2[0]) / 2;
+                const midY = (p1[1] + p2[1]) / 2;
+                
+                const lenVal = segmentLengths[i];
+                const labelText = lenVal ? `${lenVal.toFixed(1)}m` : '';
+                
+                styles.push(new ol.style.Style({
+                    geometry: new ol.geom.Point([midX, midY]),
+                    text: new ol.style.Text({
+                        text: labelText,
+                        font: 'bold 11px Outfit, sans-serif',
+                        fill: new ol.style.Fill({ color: '#ffffff' }),
+                        stroke: new ol.style.Stroke({ color: '#000000', width: 3 }),
+                        offsetY: -8,
+                        placement: 'point'
+                    })
+                }));
+            }
+        }
+    }
+    return styles;
+};
+
+// 1. Initialize Map
 function initMap() {
+    // Google Satellite Imagery layer
     const googleSatelliteLayer = new ol.layer.Tile({
         title: "Google Satellite",
         type: "base",
         visible: true,
         source: new ol.source.XYZ({
             url: "https://mt{0-3}.google.com/vt/lyrs=y&hl=en&x={x}&y={y}&z={z}&s=Ga",
-            attributions: "\u00a9 Google Maps Satellite Overlay"
+            attributions: "© Google Maps Satellite Overlay"
         })
     });
 
+    // BhuNaksha WMS Village Map layer (transparent overlay)
     plotLyr = new ol.layer.Image({
         title: "Cadastral Map",
         visible: false,
@@ -51,6 +121,7 @@ function initMap() {
         })
     });
 
+    // BhuNaksha WMS Selected Plot Highlight layer
     selPlotLyr = new ol.layer.Image({
         title: "Selected Plot",
         visible: false,
@@ -71,21 +142,16 @@ function initMap() {
         })
     });
 
-    vectorSource = new ol.source.Vector();
-    parcelVectorLayer = new ol.layer.Vector({
-        title: "Parcel Boundary",
-        visible: true,
-        source: vectorSource,
-        style: vectorStyleFunction
-    });
-
-    const applyBboxOffset = function (image, src) {
+    // Custom WMS image load function to apply alignment offsets (visual nudge)
+    const applyBboxOffset = function(image, src) {
         if (offsetX !== 0 || offsetY !== 0) {
             try {
                 const url = new URL(src, window.location.href || "http://localhost");
                 const bbox = url.searchParams.get("BBOX");
                 if (bbox) {
                     const coords = bbox.split(",").map(Number);
+                    // Subtract offset to request shifted viewport relative to OL coordinates,
+                    // which visualizes as shifting the drawn elements by +offsetX/+offsetY.
                     coords[0] -= offsetX;
                     coords[1] -= offsetY;
                     coords[2] -= offsetX;
@@ -93,7 +159,7 @@ function initMap() {
                     url.searchParams.set("BBOX", coords.join(","));
                     src = url.toString();
                 }
-            } catch (e) {
+            } catch(e) {
                 console.error("Error shifting WMS BBOX:", e);
             }
         }
@@ -103,196 +169,124 @@ function initMap() {
     plotLyr.getSource().setImageLoadFunction(applyBboxOffset);
     selPlotLyr.getSource().setImageLoadFunction(applyBboxOffset);
 
+    vectorSource = new ol.source.Vector();
+    vectorLayer = new ol.layer.Vector({
+        source: vectorSource,
+        style: vectorStyleFunction
+    });
+
+    // Setup map view centered on Patna, Bihar
     map = new ol.Map({
         target: "map",
-        layers: [googleSatelliteLayer, plotLyr, selPlotLyr, parcelVectorLayer],
+        layers: [googleSatelliteLayer, plotLyr, selPlotLyr, vectorLayer],
         view: new ol.View({
             projection: "EPSG:4326",
-            center: [85.1376, 25.5941],
+            center: [85.1376, 25.5941], // Patna GPS Coordinates
             zoom: 7
         })
     });
 }
 
-function vectorStyleFunction(feature) {
-    const geomType = feature.getGeometry().getType();
-    if (geomType === "Polygon") {
-        return new ol.style.Style({
-            fill: new ol.style.Fill({ color: "rgba(255,105,180,0.15)" }),
-            stroke: new ol.style.Stroke({ color: "#ff1493", width: 3 })
-        });
-    } else if (geomType === "Point") {
-        const label = feature.get("label");
-        if (label) {
-            return new ol.style.Style({
-                text: new ol.style.Text({
-                    text: label,
-                    font: "bold 12px Outfit, sans-serif",
-                    fill: new ol.style.Fill({ color: "#ffffff" }),
-                    stroke: new ol.style.Stroke({ color: "rgba(0,0,0,0.7)", width: 3 }),
-                    offsetY: -14
-                })
-            });
-        }
-        return new ol.style.Style({
-            image: new ol.style.Circle({
-                radius: 5,
-                fill: new ol.style.Fill({ color: "#ffffff" }),
-                stroke: new ol.style.Stroke({ color: "#ff1493", width: 2 })
-            })
-        });
-    }
-    return new ol.style.Style();
-}
-
-function redrawSelectedVector(parcelData) {
-    currentParcelData = parcelData;
-    vectorSource.clear();
-
-    if (!parcelData || !parcelData.vertices || parcelData.vertices.length < 3) return;
-
-    const vertices = parcelData.vertices;
-    const segments = parcelData.segments || [];
-
-    const ring = vertices.map(function (v) {
-        return [v.lon + offsetX, v.lat + offsetY];
-    });
-    ring.push(ring[0]);
-
-    const polygonFeature = new ol.Feature({
-        geometry: new ol.geom.Polygon([ring])
-    });
-    vectorSource.addFeature(polygonFeature);
-
-    vertices.forEach(function (v) {
-        const pt = new ol.Feature({
-            geometry: new ol.geom.Point([v.lon + offsetX, v.lat + offsetY])
-        });
-        vectorSource.addFeature(pt);
-    });
-
-    segments.forEach(function (s) {
-        if (s.start < vertices.length && s.end < vertices.length) {
-            const vStart = vertices[s.start];
-            const vEnd = vertices[s.end];
-            const midLon = (vStart.lon + vEnd.lon) / 2 + offsetX;
-            const midLat = (vStart.lat + vEnd.lat) / 2 + offsetY;
-            const label = new ol.Feature({
-                geometry: new ol.geom.Point([midLon, midLat]),
-                label: s.length_m.toFixed(1) + "m"
-            });
-            vectorSource.addFeature(label);
-        }
-    });
-}
-
-function updateOffsetReadout() {
-    const xMeters = (offsetX * metersPerDegreeLon).toFixed(1);
-    const yMeters = (offsetY * metersPerDegreeLat).toFixed(1);
-    $("#offset-x-meters").text(xMeters + "m");
-    $("#offset-y-meters").text(yMeters + "m");
-
-    plotLyr.getSource().changed();
-    selPlotLyr.getSource().changed();
-
-    if (currentParcelData) {
-        redrawSelectedVector(currentParcelData);
-    }
-}
-
+// 2. Initialize Dropdowns (Trigger first level - Districts)
 function initDropdowns() {
-    fetchDropdown(0, "");
+    fetchDropdown(0, ""); // Fetch Level 0 -> District List
 }
 
+// 3. Dropdown Fetching Logic
 function fetchDropdown(level, parentCodes) {
-    showLoading(true, "Loading administrative levels...");
-
+    showLoading(true, `Loading administrative levels...`);
+    
     $.post("/proxy/Levels/ListsAfterLevel", {
         state: stateCode,
         level: level,
         codes: parentCodes,
         hasmap: "true"
-    }, function (data) {
+    }, function(data) {
         showLoading(false);
         if (!data || data.length === 0) return;
 
+        // The dropdown data is returned at index 0 of the response list
         const options = data[0];
         const targetSelectId = getSelectIdForLevel(level + 1);
-        const $select = $("#" + targetSelectId);
-
-        $select.empty().append('<option value="">--Select ' + getLevelLabel(level + 1) + '--</option>');
-
-        options.forEach(function (item) {
+        const $select = $(`#${targetSelectId}`);
+        
+        $select.empty().append(`<option value="">--Select ${getLevelLabel(level + 1)}--</option>`);
+        
+        options.forEach(item => {
             $select.append($("<option></option>").attr("value", item.code).text(item.value));
         });
 
         $select.prop("disabled", false);
-    }, "json").fail(function () {
+    }, "json").fail(function(xhr, status, error) {
         showLoading(false);
         showToast("Error loading level options", "error");
     });
 }
 
+// 4. Setup Event Listeners
 function setupEventListeners() {
-    $("#opacity-slider").on("input", function () {
+    // Opacity Slider
+    $("#opacity-slider").on("input", function() {
         const val = $(this).val();
-        $("#opacity-value").text(val + "%");
+        $("#opacity-value").text(`${val}%`);
         if (plotLyr) {
             plotLyr.setOpacity(val / 100);
         }
     });
 
-    $("#sidebar-toggle-collapse").click(function () {
+    // Sidebar Toggles
+    $("#sidebar-toggle-collapse").click(function() {
         $("#sidebar").addClass("collapsed");
         $("#sidebar-toggle-float").show();
     });
 
-    $("#sidebar-toggle-float").click(function () {
+    $("#sidebar-toggle-float").click(function() {
         $("#sidebar").removeClass("collapsed");
         $(this).hide();
     });
 
-    $("#select-district").change(function () {
+    // Dropdown Cascade Triggers
+    $("#select-district").change(function() {
         resetDropdownsFrom(2);
         const val = $(this).val();
-        if (val) fetchDropdown(1, val + ",");
+        if (val) fetchDropdown(1, `${val},`);
     });
 
-    $("#select-subdiv").change(function () {
+    $("#select-subdiv").change(function() {
         resetDropdownsFrom(3);
         const val = $(this).val();
         const dist = $("#select-district").val();
-        if (val) fetchDropdown(2, dist + "," + val + ",");
+        if (val) fetchDropdown(2, `${dist},${val},`);
     });
 
-    $("#select-circle").change(function () {
+    $("#select-circle").change(function() {
         resetDropdownsFrom(4);
         const val = $(this).val();
         const dist = $("#select-district").val();
         const subdiv = $("#select-subdiv").val();
-        if (val) fetchDropdown(3, dist + "," + subdiv + "," + val + ",");
+        if (val) fetchDropdown(3, `${dist},${subdiv},${val},`);
     });
 
-    $("#select-mouza").change(function () {
+    $("#select-mouza").change(function() {
         resetDropdownsFrom(5);
         const val = $(this).val();
         const dist = $("#select-district").val();
         const subdiv = $("#select-subdiv").val();
         const circle = $("#select-circle").val();
-        if (val) fetchDropdown(4, dist + "," + subdiv + "," + circle + "," + val + ",");
+        if (val) fetchDropdown(4, `${dist},${subdiv},${circle},${val},`);
     });
 
-    $("#select-survey").change(function () {
+    $("#select-survey").change(function() {
         resetDropdownsFrom(6);
         const val = $(this).val();
         const dist = $("#select-district").val();
         const subdiv = $("#select-subdiv").val();
         const circle = $("#select-circle").val();
         const mouza = $("#select-mouza").val();
-        if (val) fetchDropdown(5, dist + "," + subdiv + "," + circle + "," + mouza + "," + val + ",");
+        if (val) fetchDropdown(5, `${dist},${subdiv},${circle},${mouza},${val},`);
     });
 
-    $("#select-mapinst").change(function () {
+    $("#select-mapinst").change(function() {
         resetDropdownsFrom(7);
         const val = $(this).val();
         const dist = $("#select-district").val();
@@ -300,60 +294,118 @@ function setupEventListeners() {
         const circle = $("#select-circle").val();
         const mouza = $("#select-mouza").val();
         const survey = $("#select-survey").val();
-        if (val) fetchDropdown(6, dist + "," + subdiv + "," + circle + "," + mouza + "," + survey + "," + val + ",");
+        if (val) fetchDropdown(6, `${dist},${subdiv},${circle},${mouza},${survey},${val},`);
     });
 
-    $("#select-sheet").change(function () {
+    // Final Sheet selection triggers loading map
+    $("#select-sheet").change(function() {
         const val = $(this).val();
         if (val) {
-            currentAdminNames.district = $("#select-district option:selected").text();
-            currentAdminNames.subdivision = $("#select-subdiv option:selected").text();
-            currentAdminNames.circle = $("#select-circle option:selected").text();
-            currentAdminNames.mouza = $("#select-mouza option:selected").text();
-            currentAdminNames.sheet = $("#select-sheet option:selected").text();
             loadVillageSheet();
         }
     });
 
-    const stepDeg = 0.00001;
+    // Setup Nudge Button event handlers
+    const updateOffsetReadout = function() {
+        const xMeters = (offsetX * metersPerDegreeLon).toFixed(1);
+        const yMeters = (offsetY * metersPerDegreeLat).toFixed(1);
+        $("#offset-x-meters").text(`${xMeters}m`);
+        $("#offset-y-meters").text(`${yMeters}m`);
+        
+        // Force refresh WMS layer visual positions by marking source as changed
+        plotLyr.getSource().changed();
+        selPlotLyr.getSource().changed();
+        
+        // Redraw vector polygon with updated shift
+        redrawSelectedVector();
+    };
 
-    $("#btn-nudge-up").click(function () {
+    const stepDeg = 0.00001; // roughly 1 meter shift per click
+
+    $("#btn-nudge-up").click(function() {
         offsetY += stepDeg;
         updateOffsetReadout();
     });
 
-    $("#btn-nudge-down").click(function () {
+    $("#btn-nudge-down").click(function() {
         offsetY -= stepDeg;
         updateOffsetReadout();
     });
 
-    $("#btn-nudge-left").click(function () {
+    $("#btn-nudge-left").click(function() {
         offsetX -= stepDeg;
         updateOffsetReadout();
     });
 
-    $("#btn-nudge-right").click(function () {
+    $("#btn-nudge-right").click(function() {
         offsetX += stepDeg;
         updateOffsetReadout();
     });
 
-    $("#btn-nudge-reset").click(function () {
+    $("#btn-nudge-reset").click(function() {
         offsetX = 0.0;
         offsetY = 0.0;
         updateOffsetReadout();
     });
 
-    map.on("singleclick", function (evt) {
+    // PDF Modal view button
+    $("#btn-view-ldm").click(function() {
+        if (currentParcelData && currentParcelData.report && currentParcelData.report.url) {
+            $("#pdf-iframe").attr("src", currentParcelData.report.url);
+            $("#pdf-modal").addClass("active");
+        }
+    });
+
+    // Close PDF modal
+    $("#btn-close-pdf").click(function() {
+        $("#pdf-modal").removeClass("active");
+        $("#pdf-iframe").attr("src", "");
+    });
+    
+    // Close modal on background click
+    $("#pdf-modal").click(function(e) {
+        if (e.target === this) {
+            $(this).removeClass("active");
+            $("#pdf-iframe").attr("src", "");
+        }
+    });
+
+    // PDF Download button
+    $("#btn-download-ldm").click(function() {
+        if (currentParcelData && currentParcelData.report && currentParcelData.report.url) {
+            window.open(currentParcelData.report.url, "_blank");
+        }
+    });
+
+    // Export GeoJSON
+    $("#btn-export-geojson").click(function() {
+        if (currentParcelData && currentParcelData.parcel) {
+            const url = `/proxy/Export/GeoJSON/${currentParcelData.parcel.plot_no}?parcel_id=${currentParcelData.parcel.id}`;
+            window.open(url, "_blank");
+        }
+    });
+
+    // Export CSV
+    $("#btn-export-csv").click(function() {
+        if (currentParcelData && currentParcelData.parcel) {
+            const url = `/proxy/Export/CSV/${currentParcelData.parcel.plot_no}?parcel_id=${currentParcelData.parcel.id}`;
+            window.open(url, "_blank");
+        }
+    });
+
+    // Click on Map coordinates to select parcel
+    map.on("singleclick", function(evt) {
         if (!currentGisCode) {
             showToast("Please select a location sheet first", "warning");
             return;
         }
 
-        const coords = evt.coordinate;
+        const coords = evt.coordinate; // [lon, lat]
+        // Nudge coords: subtract offset to match shifted visual overlay back to base coordinate system
         const lon = coords[0] - offsetX;
         const lat = coords[1] - offsetY;
 
-        showLoading(true, "Querying clicked parcel...");
+        showLoading(true, "Querying clicked parcel coordinates...");
 
         $.post("/proxy/MapInfo/getPlotAtGPS", {
             state: stateCode,
@@ -361,210 +413,43 @@ function setupEventListeners() {
             levels: currentLevels,
             lon: lon,
             lat: lat
-        }, function (data) {
-            if (data && data.id) {
-                selPlotLyr.getSource().updateParams({
-                    "gis_code": currentGisCode,
-                    "plot_id": data.id
-                });
-                selPlotLyr.setVisible(true);
-
-                const plotNo = data.kide || "";
-                const plotId = data.id || "";
-                fetchParcelDetails(plotNo, plotId, lon, lat);
+        }, function(data) {
+            showLoading(false);
+            if (data && data.kide) {
+                selectPlotByNumber(data.kide);
             } else {
-                showLoading(false);
                 showToast("No parcel found at clicked coordinates", "warning");
             }
-        }, "json").fail(function () {
+        }, "json").fail(function() {
             showLoading(false);
             showToast("Failed to query clicked coordinates", "error");
         });
     });
 
+    // Search by PNIU Code
     $("#btn-search-pniu").click(executePniuSearch);
-    $("#search-pniu").keypress(function (e) {
+    $("#search-pniu").keypress(function(e) {
         if (e.which === 13) executePniuSearch();
     });
 
-    $("#btn-download-map").click(function () {
+    // Scrape / Download Map Image
+    $("#btn-download-map").click(function() {
         if (!currentGisCode || !currentExtent) {
             showToast("Please select a map sheet to scrape", "warning");
             return;
         }
 
-        const bboxStr = currentExtent.xmin + "," + currentExtent.ymin + "," + currentExtent.xmax + "," + currentExtent.ymax;
-        const downloadUrl = "/proxy/WMS?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=VILLAGE_MAP&transparent=true&state=" + stateCode + "&SRS=EPSG:4326&gis_code=" + currentGisCode + "&BBOX=" + bboxStr + "&WIDTH=2048&HEIGHT=1536&FORMAT=image/png";
-
+        // Construct a direct WMS GetMap download link for the user
+        const bboxStr = `${currentExtent.xmin},${currentExtent.ymin},${currentExtent.xmax},${currentExtent.ymax}`;
+        const downloadUrl = `/proxy/WMS?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=VILLAGE_MAP&transparent=true&state=${stateCode}&SRS=EPSG:4326&gis_code=${currentGisCode}&BBOX=${bboxStr}&WIDTH=2048&HEIGHT=1536&FORMAT=image/png`;
+        
+        // Open download link in a new tab
         window.open(downloadUrl, "_blank");
         showToast("Scraping high-resolution WMS image...", "success");
     });
 }
 
-function setupParcelEventListeners() {
-    $("#btn-view-report").click(function () {
-        if (!currentParcelData || !currentParcelData.report) return;
-        const giscode = currentParcelData.parcel.giscode;
-        const plotNo = currentParcelData.parcel.plot_no;
-        const pdfUrl = "/proxy/Reports/" + giscode + "/" + plotNo;
-        $("#pdf-viewer").attr("src", pdfUrl);
-        $("#pdf-modal").fadeIn(200);
-    });
-
-    $("#btn-modal-close").click(function () {
-        $("#pdf-modal").fadeOut(200);
-        setTimeout(function () {
-            $("#pdf-viewer").attr("src", "");
-        }, 300);
-    });
-
-    $(document).click(function (e) {
-        if ($(e.target).is("#pdf-modal")) {
-            $("#pdf-modal").fadeOut(200);
-            setTimeout(function () {
-                $("#pdf-viewer").attr("src", "");
-            }, 300);
-        }
-    });
-
-    $(document).keydown(function (e) {
-        if (e.key === "Escape" && $("#pdf-modal").is(":visible")) {
-            $("#pdf-modal").fadeOut(200);
-            setTimeout(function () {
-                $("#pdf-viewer").attr("src", "");
-            }, 300);
-        }
-    });
-
-    $("#btn-download-report").click(function () {
-        if (!currentParcelData || !currentParcelData.report) return;
-        const giscode = currentParcelData.parcel.giscode;
-        const plotNo = currentParcelData.parcel.plot_no;
-        window.open("/proxy/Reports/" + giscode + "/" + plotNo, "_blank");
-    });
-
-    $("#btn-export-geojson").click(function () {
-        if (!currentParcelData) return;
-        const giscode = currentParcelData.parcel.giscode;
-        const plotNo = currentParcelData.parcel.plot_no;
-        window.location.href = "/proxy/Export/GeoJSON/" + giscode + "/" + plotNo;
-    });
-
-    $("#btn-export-csv").click(function () {
-        if (!currentParcelData) return;
-        const giscode = currentParcelData.parcel.giscode;
-        const plotNo = currentParcelData.parcel.plot_no;
-        window.location.href = "/proxy/Export/CSV/" + giscode + "/" + plotNo;
-    });
-}
-
-function fetchParcelDetails(plotNo, plotId, clickLon, clickLat) {
-    if (!plotNo || !currentGisCode) {
-        showLoading(false);
-        return;
-    }
-
-    var postData = {
-        state: stateCode,
-        giscode: currentGisCode,
-        plot_no: plotNo,
-        plot_id: plotId || "",
-        levels: currentLevels,
-        district_name: currentAdminNames.district,
-        subdivision_name: currentAdminNames.subdivision,
-        circle_name: currentAdminNames.circle,
-        mouza_name: currentAdminNames.mouza,
-        sheet_no: currentAdminNames.sheet
-    };
-    if (clickLon != null) postData.click_lon = clickLon;
-    if (clickLat != null) postData.click_lat = clickLat;
-
-    $.ajax({
-        url: "/proxy/MapInfo/getPlotDetailsAndInspection",
-        method: "POST",
-        data: postData,
-        dataType: "json",
-        timeout: 30000,
-        success: function (data) {
-            showLoading(false);
-            if (!data || !data.parcel) {
-                showToast("Failed to load parcel details", "error");
-                return;
-            }
-            populateParcelPanels(data);
-            if (data.vertices && data.vertices.length > 0) {
-                redrawSelectedVector(data);
-            }
-            showToast("Plot " + plotNo + " details loaded", "success");
-        },
-        error: function () {
-            showLoading(false);
-            showToast("Failed to fetch parcel details", "error");
-        }
-    });
-}
-
-function populateParcelPanels(data) {
-    const p = data.parcel;
-
-    $("#val-district").text(p.district || "--");
-    $("#val-circle").text(p.circle || "--");
-    $("#val-mouza").text(p.mouza || "--");
-    $("#val-sheet-no").text(p.sheet_no || "--");
-    $("#val-plot-no").text(p.plot_no || "--");
-    $("#val-khata").text(p.khata_no || "--");
-    $("#val-pniu").text(p.pniu || "--");
-
-    if (p.owner_names && p.owner_names.length > 0) {
-        $("#val-owners").text(p.owner_names.join("\n"));
-    } else {
-        $("#val-owners").text("--");
-    }
-
-    if (p.area_sqm != null && p.area_sqm > 0) {
-        $("#val-area-acres").text(p.area_acres.toFixed(4) + " acres");
-        $("#val-area-ha").text(p.area_hectares.toFixed(4) + " ha");
-        $("#val-area-sqm").text(p.area_sqm.toFixed(2) + " sq.m");
-    } else {
-        $("#val-area-acres").text("--");
-        $("#val-area-ha").text("");
-        $("#val-area-sqm").text("");
-    }
-
-    $("#val-perimeter").text(p.perimeter_m != null && p.perimeter_m > 0 ? p.perimeter_m.toFixed(2) + " m" : "--");
-    $("#val-longest-side").text(p.longest_side_m != null && p.longest_side_m > 0 ? p.longest_side_m.toFixed(2) + " m" : "--");
-    $("#val-shortest-side").text(p.shortest_side_m != null && p.shortest_side_m > 0 ? p.shortest_side_m.toFixed(2) + " m" : "--");
-    $("#val-vertex-count").text(p.vertex_count != null && p.vertex_count > 0 ? p.vertex_count : "--");
-
-    $("#panel-parcel-details").show();
-
-    if (p.area_sqm != null && p.area_sqm > 0) {
-        $("#panel-measurements").show();
-    } else {
-        $("#panel-measurements").hide();
-    }
-
-    var hasGeometry = data.vertices && data.vertices.length > 0;
-    $("#btn-view-report").prop("disabled", true);
-    $("#btn-download-report").prop("disabled", true);
-    $("#btn-export-geojson").prop("disabled", !hasGeometry);
-    $("#btn-export-csv").prop("disabled", !hasGeometry);
-
-    if (hasGeometry) {
-        $("#panel-documents").show();
-    } else {
-        $("#panel-documents").hide();
-    }
-}
-
-function clearParcelPanels() {
-    $("#panel-parcel-details").hide();
-    $("#panel-measurements").hide();
-    $("#panel-documents").hide();
-    currentParcelData = null;
-    vectorSource.clear();
-}
-
+// 5. Load Village Sheet Extents & WMS
 function loadVillageSheet() {
     const dist = $("#select-district").val();
     const subdiv = $("#select-subdiv").val();
@@ -574,15 +459,16 @@ function loadVillageSheet() {
     const mapinst = $("#select-mapinst").val();
     const sheet = $("#select-sheet").val();
 
-    currentLevels = dist + "," + subdiv + "," + circle + "," + mouza + "," + survey + "," + mapinst + "," + sheet + ",";
-
+    // Construct level string (comma terminated)
+    currentLevels = `${dist},${subdiv},${circle},${mouza},${survey},${mapinst},${sheet},`;
+    
     showLoading(true, "Fetching georeferenced sheet boundaries...");
 
     $.post("/proxy/MapInfo/getVVVVExtentGeoref", {
         state: stateCode,
         gisLevels: currentLevels,
-        srs: "4326"
-    }, function (data) {
+        srs: "4326" // Directly request GPS coordinates
+    }, function(data) {
         showLoading(false);
         if (!data || !data.gisCode) {
             showToast("Failed to load sheet metadata", "error");
@@ -591,11 +477,14 @@ function loadVillageSheet() {
 
         currentGisCode = data.gisCode;
 
+        // Check for Sheet "00" or Database anomalies
+        // Mismatched check: degrees (xmin/ymin) vs meters (xmax/ymax)
+        // If xmax > 180, it's UTM meters, indicating corrupted extent
         const isAnomaly = (data.xmax > 180 && data.xmin < 180) || (data.xmin === 0 && data.ymin === 0);
 
         if (isAnomaly) {
             currentExtent = {
-                xmin: 84.0,
+                xmin: 84.0, // General Bihar bounds fallback
                 ymin: 24.5,
                 xmax: 88.0,
                 ymax: 27.5
@@ -610,27 +499,31 @@ function loadVillageSheet() {
                 xmax: data.xmax,
                 ymax: data.ymax
             };
+            // Fit map view to GPS bounds
             map.getView().fit([data.xmin, data.ymin, data.xmax, data.ymax], {
                 size: map.getSize(),
                 duration: 1000
             });
         }
 
+        // Update WMS layer source parameters
         plotLyr.getSource().updateParams({
             "gis_code": currentGisCode
         });
         plotLyr.setVisible(true);
 
+        // Reset selected plot layer
         selPlotLyr.setVisible(false);
-        clearParcelPanels();
-
+        clearDetails();
+        
         showToast("Cadastral map overlaid successfully", "success");
-    }, "json").fail(function () {
+    }, "json").fail(function() {
         showLoading(false);
         showToast("Error retrieving map boundaries", "error");
     });
 }
 
+// 6. Execute PNIU Search
 function executePniuSearch() {
     const pniu = $("#search-pniu").val().trim();
     if (!pniu) {
@@ -642,57 +535,232 @@ function executePniuSearch() {
         return;
     }
 
-    showLoading(true, "Resolving PNIU code: " + pniu + "...");
+    showLoading(true, `Resolving PNIU code: ${pniu}...`);
 
     $.post("/proxy/MapInfo/getPointsfromPNIU", {
         state: stateCode,
         pniu: pniu,
         gisCode: currentGisCode
-    }, function (data) {
-        showLoading(false);
+    }, function(data) {
         if (!data || data.includes("null") || data.split(",").length < 10) {
+            showLoading(false);
             showToast("PNIU code not found in this village sheet", "error");
             return;
         }
 
         const parts = data.split(",");
-        const plotId = parts[4];
         const plotNo = parts[5];
-        const centerLon = parseFloat(parts[2]);
-        const centerLat = parseFloat(parts[3]);
-
-        const xmin = parseFloat(parts[6]);
-        const ymin = parseFloat(parts[7]);
-        const xmax = parseFloat(parts[8]);
-        const ymax = parseFloat(parts[9]);
-
-        selPlotLyr.getSource().updateParams({
-            "gis_code": currentGisCode,
-            "plot_id": plotId
-        });
-        selPlotLyr.setVisible(true);
-
-        map.getView().fit([xmin + offsetX, ymin + offsetY, xmax + offsetX, ymax + offsetY], {
-            size: map.getSize(),
-            duration: 1000
-        });
-
-        fetchParcelDetails(plotNo, plotId, centerLon, centerLat);
-    }, "text").fail(function () {
+        
+        // Query details and geometry for the resolved plot number
+        selectPlotByNumber(plotNo);
+    }, "text").fail(function() {
         showLoading(false);
         showToast("Failed to search PNIU code", "error");
     });
 }
 
+// Helper: Clear Details Sidebar
+function clearDetails() {
+    $("#val-plot-no").text("--");
+    $("#val-khata-no").text("--");
+    $("#val-pniu").text("--");
+    $("#val-lat").text("--");
+    $("#val-lon").text("--");
+    $("#val-owners").text("--");
+    
+    $("#val-area-sqm").text("--");
+    $("#val-area-acres").text("--");
+    $("#val-area-hectares").text("--");
+    $("#val-perimeter").text("--");
+    $("#val-vertices-count").text("--");
+    $("#val-longest-side").text("--");
+    $("#val-shortest-side").text("--");
+    $("#val-avg-side").text("--");
+    
+    $("#btn-view-ldm").prop("disabled", true);
+    $("#btn-download-ldm").prop("disabled", true);
+    $("#btn-export-geojson").prop("disabled", true);
+    $("#btn-export-csv").prop("disabled", true);
+    
+    currentParcelData = null;
+    if (vectorSource) {
+        vectorSource.clear();
+    }
+}
+
+// Fetch Full Plot Details and Geometry
+function selectPlotByNumber(plotNo) {
+    showLoading(true, `Loading details for plot ${plotNo}...`);
+    
+    $.post("/proxy/MapInfo/getPlotDetailsAndInspection", {
+        state: stateCode,
+        giscode: currentGisCode,
+        plot_no: plotNo,
+        levels: currentLevels
+    }, function(res) {
+        showLoading(false);
+        if (res && res.success) {
+            displayParcelDetails(res);
+            zoomToParcel();
+            showToast(`Plot ${plotNo} details loaded successfully`, "success");
+        } else {
+            showToast(res.error || "Failed to retrieve plot details", "error");
+        }
+    }, "json").fail(function(xhr) {
+        showLoading(false);
+        const err = xhr.responseJSON ? xhr.responseJSON.error : "Failed to query backend server";
+        showToast(err, "error");
+    });
+}
+
+// Render Parcel details and draw vector overlay
+function displayParcelDetails(data) {
+    currentParcelData = data;
+    
+    // Update Details
+    $("#val-plot-no").text(data.parcel.plot_no || "--");
+    $("#val-khata-no").text(data.parcel.khata_no || "--");
+    $("#val-pniu").text(data.parcel.pniu || "--");
+    $("#val-lat").text(data.parcel.lat != null ? data.parcel.lat.toFixed(6) : "--");
+    $("#val-lon").text(data.parcel.lon != null ? data.parcel.lon.toFixed(6) : "--");
+    
+    const $owners = $("#val-owners");
+    $owners.empty();
+    if (data.parcel.owner_names && data.parcel.owner_names.length > 0) {
+        data.parcel.owner_names.forEach((name, i) => {
+            $owners.append(`<div>${i+1}. ${name}</div>`);
+        });
+    } else {
+        $owners.text("--");
+    }
+    
+    // Update Measurements
+    const areaVal = data.parcel.area;
+    $("#val-area-sqm").text(areaVal != null ? `${areaVal.toFixed(1)} m²` : "--");
+    $("#val-area-acres").text(areaVal != null ? `${(areaVal / 4046.8564).toFixed(3)} acres` : "--");
+    $("#val-area-hectares").text(areaVal != null ? `${(areaVal / 10000.0).toFixed(3)} ha` : "--");
+    $("#val-perimeter").text(data.parcel.perimeter != null ? `${data.parcel.perimeter.toFixed(1)} m` : "--");
+    $("#val-vertices-count").text(data.vertices.length || "--");
+    
+    if (data.segments && data.segments.length > 0) {
+        const lengths = data.segments.map(s => s.length_meters);
+        const maxLen = Math.max(...lengths);
+        const minLen = Math.min(...lengths);
+        const sumLen = lengths.reduce((a, b) => a + b, 0);
+        const avgLen = sumLen / lengths.length;
+        
+        $("#val-longest-side").text(`${maxLen.toFixed(1)} m`);
+        $("#val-shortest-side").text(`${minLen.toFixed(1)} m`);
+        $("#val-avg-side").text(`${avgLen.toFixed(1)} m`);
+    } else {
+        $("#val-longest-side").text("--");
+        $("#val-shortest-side").text("--");
+        $("#val-avg-side").text("--");
+    }
+    
+    // Enable Exports
+    $("#btn-export-geojson").prop("disabled", false);
+    $("#btn-export-csv").prop("disabled", false);
+    
+    // Enable PDF controls
+    if (data.report && data.report.url) {
+        $("#btn-view-ldm").prop("disabled", false);
+        $("#btn-download-ldm").prop("disabled", false);
+    } else {
+        $("#btn-view-ldm").prop("disabled", true);
+        $("#btn-download-ldm").prop("disabled", true);
+    }
+    
+    // Draw vector polygon on map
+    redrawSelectedVector();
+    
+    // Highlight WMS layer
+    selPlotLyr.getSource().updateParams({
+        "gis_code": currentGisCode,
+        "plot_id": data.parcel.plot_id
+    });
+    selPlotLyr.setVisible(true);
+
+    // Auto-scroll sidebar content to the Measurements section
+    const $sidebarContent = $(".sidebar-content");
+    const $measurementSection = $("#measurement-section");
+    if ($sidebarContent.length && $measurementSection.length) {
+        const sidebarOffset = $sidebarContent.offset();
+        const measurementOffset = $measurementSection.offset();
+        if (sidebarOffset && measurementOffset) {
+            const scrollTopTarget = measurementOffset.top - sidebarOffset.top + $sidebarContent.scrollTop() - 10;
+            $sidebarContent.animate({
+                scrollTop: scrollTopTarget
+            }, 600);
+        }
+    }
+
+    // Trigger visual highlight animation
+    const $measurementCard = $("#measurement-card");
+    if ($measurementCard.length) {
+        $measurementCard.addClass("section-highlight");
+        setTimeout(() => {
+            $measurementCard.removeClass("section-highlight");
+        }, 2000);
+    }
+}
+
+
+// Draw/Shift vector polygon boundary on map
+function redrawSelectedVector() {
+    if (!vectorSource) return;
+    vectorSource.clear();
+    if (!currentParcelData || !currentParcelData.vertices || currentParcelData.vertices.length === 0) return;
+    
+    // Transform coordinates adding current user georef offset shift
+    const coords = currentParcelData.vertices.map(v => [
+        v.lon + offsetX,
+        v.lat + offsetY
+    ]);
+    
+    // Polygon must be closed (start == end) in OpenLayers
+    if (coords.length > 0 && (coords[0][0] !== coords[coords.length-1][0] || coords[0][1] !== coords[coords.length-1][1])) {
+        coords.push(coords[0]);
+    }
+    
+    const polyGeom = new ol.geom.Polygon([coords]);
+    const feature = new ol.Feature({
+        geometry: polyGeom
+    });
+    
+    feature.set('segment_lengths', currentParcelData.segments.map(s => s.length_meters));
+    vectorSource.addFeature(feature);
+}
+
+// Zoom map view to shifted parcel bounding box
+function zoomToParcel() {
+    if (!currentParcelData || !currentParcelData.vertices || currentParcelData.vertices.length === 0) return;
+    
+    const lons = currentParcelData.vertices.map(v => v.lon);
+    const lats = currentParcelData.vertices.map(v => v.lat);
+    
+    const xmin = Math.min(...lons) + offsetX;
+    const xmax = Math.max(...lons) + offsetX;
+    const ymin = Math.min(...lats) + offsetY;
+    const ymax = Math.max(...lats) + offsetY;
+    
+    map.getView().fit([xmin, ymin, xmax, ymax], {
+        size: map.getSize(),
+        duration: 1000
+    });
+}
+
+// Helper: Reset dropdowns below a certain level
 function resetDropdownsFrom(levelNumber) {
     for (let l = levelNumber; l <= 7; l++) {
         const selectId = getSelectIdForLevel(l);
-        const $select = $("#" + selectId);
-        $select.empty().append('<option value="">--Select ' + getLevelLabel(l) + '--</option>');
+        const $select = $(`#${selectId}`);
+        $select.empty().append(`<option value="">--Select ${getLevelLabel(l)}--</option>`);
         $select.prop("disabled", true);
     }
 }
 
+// Helper: Map Level to Select ID
 function getSelectIdForLevel(level) {
     const ids = {
         1: "select-district",
@@ -706,6 +774,7 @@ function getSelectIdForLevel(level) {
     return ids[level];
 }
 
+// Helper: Map Level to human-readable labels
 function getLevelLabel(level) {
     const labels = {
         1: "District",
@@ -719,8 +788,8 @@ function getLevelLabel(level) {
     return labels[level];
 }
 
-function showLoading(show, text) {
-    if (text === undefined) text = "Loading...";
+// Helper: Toggle Loading Overlay
+function showLoading(show, text = "Loading...") {
     const $loader = $("#loading");
     $("#loading-text").text(text);
     if (show) {
@@ -730,24 +799,25 @@ function showLoading(show, text) {
     }
 }
 
+// Helper: Toast Notifications
 let toastTimeout;
-function showToast(message, type) {
-    if (type === undefined) type = "info";
+function showToast(message, type = "info") {
     clearTimeout(toastTimeout);
     const $toast = $("#toast");
     const $icon = $("#toast-icon");
     $("#toast-message").text(message);
 
+    // Reset styles
     $icon.removeClass("warning error success info");
-
+    
     if (type === "warning") $icon.addClass("fa-exclamation-triangle warning");
     else if (type === "error") $icon.addClass("fa-times-circle error");
     else if (type === "success") $icon.addClass("fa-check-circle success");
     else $icon.addClass("fa-info-circle info");
 
     $toast.addClass("active");
-
-    toastTimeout = setTimeout(function () {
+    
+    toastTimeout = setTimeout(() => {
         $toast.removeClass("active");
     }, 4000);
 }

@@ -1,30 +1,32 @@
 import sys
 import os
 import json
-import io
-import csv
 import math
 import requests
 import urllib3
-from datetime import datetime
-from flask import Flask, render_template, request, Response, jsonify, send_file
+import shapely.wkt
+from bs4 import BeautifulSoup
+from flask import Flask, render_template, request, Response, jsonify
+from models import db, Parcel, ParcelVertex, BoundarySegment, LdmReport
 
-
+# Disable insecure request warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///bhunaksha.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-from models import db, Parcel, ParcelVertex, LdmReport
-
 db.init_app(app)
+
+with app.app_context():
+    db.create_all()
 
 BHUNAKSHA_URL = "https://bhunaksha.bihar.gov.in"
 
+# Global session to maintain cookies
 session = requests.Session()
 session.verify = False
 
+# Persistent cache files
 DROPDOWN_CACHE_FILE = "dropdown_cache.json"
 EXTENT_CACHE_FILE = "extent_cache.json"
 
@@ -48,17 +50,21 @@ lists_after_level_cache = load_json_cache(DROPDOWN_CACHE_FILE)
 vvvv_extent_cache = load_json_cache(EXTENT_CACHE_FILE)
 
 def init_session():
+    """Establishes the session cookies with BhuNaksha."""
     global session
     try:
         print("Initializing session cookies...")
+        # Start a fresh session
         session = requests.Session()
         session.verify = False
-
+        
+        # Get landing page to establish cookies (using index.jsp for speed and reliability)
         url_jsp = f"{BHUNAKSHA_URL}/10/index.jsp"
         r1 = session.get(url_jsp, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }, timeout=15)
-
+        
+        # Load main page to make sure session state is fully active
         session.post(f"{BHUNAKSHA_URL}/10/indexmain.jsp", data={"state": "10"}, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": url_jsp
@@ -69,14 +75,14 @@ def init_session():
         print("Error establishing session:", e)
         return False
 
-with app.app_context():
-    db.create_all()
-
+# Initialize on startup
 init_session()
 
 def safe_post(url, data, headers, referer_path="/10/indexmain.jsp"):
+    """Performs a POST request, self-healing session if it fails or returns error. Increased timeout to 30s."""
     try:
         r = session.post(url, data=data, headers=headers, timeout=30)
+        # Check if response is HTML (redirects/session expiry) when we expect REST JSON/text
         is_html_error = r.headers.get("Content-Type", "").startswith("text/html") or r.text.strip().startswith("<")
         if r.status_code in [401, 403, 500] or "Error" in r.text[:200] or is_html_error:
             print(f"Warning: POST {url} returned {r.status_code} (HTML/Error). Re-initializing session...")
@@ -92,8 +98,10 @@ def safe_post(url, data, headers, referer_path="/10/indexmain.jsp"):
         raise e
 
 def safe_get(url, params, headers):
+    """Performs a GET request, self-healing session if it fails or returns error. Increased timeout to 30s."""
     try:
         r = session.get(url, params=params, headers=headers, timeout=30)
+        # Check if response is HTML (redirects/session expiry) when we expect REST/WMS data
         is_html_error = r.headers.get("Content-Type", "").startswith("text/html") or r.text.strip().startswith("<")
         if r.status_code in [401, 403, 500] or "Error" in r.text[:200] or is_html_error:
             print(f"Warning: GET {url} returned {r.status_code} (HTML/Error). Re-initializing session...")
@@ -116,8 +124,6 @@ def get_proxy_headers(referer_path="/10/indexmain.jsp", content_type=None):
         headers["Content-Type"] = content_type
     return headers
 
-# ---- Existing Endpoints ----
-
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -128,11 +134,13 @@ def proxy_lists_after_level():
     state = data.get("state", "10")
     level = data.get("level", "0")
     codes = data.get("codes", "")
-
+    
+    # Check cache
     cache_key = f"{state}_{level}_{codes}"
     if cache_key in lists_after_level_cache:
+        # Serve immediately from cache
         return jsonify(lists_after_level_cache[cache_key])
-
+        
     url = f"{BHUNAKSHA_URL}/rest/Levels/ListsAfterLevel"
     headers = get_proxy_headers(content_type="application/x-www-form-urlencoded; charset=UTF-8")
     try:
@@ -155,11 +163,12 @@ def proxy_extent():
     state = data.get("state", "10")
     gis_levels = data.get("gisLevels", "")
     srs = data.get("srs", "4326")
-
+    
+    # Check cache
     cache_key = f"{state}_{gis_levels}_{srs}"
     if cache_key in vvvv_extent_cache:
         return jsonify(vvvv_extent_cache[cache_key])
-
+        
     url = f"{BHUNAKSHA_URL}/rest/MapInfo/getVVVVExtentGeoref"
     headers = get_proxy_headers(content_type="application/x-www-form-urlencoded; charset=UTF-8")
     try:
@@ -189,23 +198,27 @@ def proxy_plot_at_xy():
 
 @app.route("/proxy/MapInfo/getPlotAtGPS", methods=["POST"])
 def get_plot_at_gps():
+    """Converts input GPS coordinate [lon, lat] to local village UTM coordinates using 
+       bounding box interpolation, then calls the getPlotAtXY REST endpoint."""
     data = request.form.to_dict()
     state = data.get("state", "10")
     giscode = data.get("giscode")
     levels = data.get("levels")
-
+    
     try:
         lon = float(data.get("lon"))
         lat = float(data.get("lat"))
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid coordinate inputs"}), 400
-
+        
     headers = get_proxy_headers(content_type="application/x-www-form-urlencoded; charset=UTF-8")
-
+    
     try:
+        # Check cache for extent maps
         gps_cache_key = f"{state}_{levels}_4326"
         utm_cache_key = f"{state}_{levels}_0"
-
+        
+        # 1. Fetch GPS extent (srs: 4326)
         if gps_cache_key in vvvv_extent_cache:
             g_data = vvvv_extent_cache[gps_cache_key]
         else:
@@ -218,7 +231,8 @@ def get_plot_at_gps():
             if g_data:
                 vvvv_extent_cache[gps_cache_key] = g_data
                 save_json_cache(EXTENT_CACHE_FILE, vvvv_extent_cache)
-
+        
+        # 2. Fetch UTM extent (srs: 0)
         if utm_cache_key in vvvv_extent_cache:
             u_data = vvvv_extent_cache[utm_cache_key]
         else:
@@ -231,21 +245,23 @@ def get_plot_at_gps():
             if u_data:
                 vvvv_extent_cache[utm_cache_key] = u_data
                 save_json_cache(EXTENT_CACHE_FILE, vvvv_extent_cache)
-
-        if g_data.get("xmin") and u_data.get("xmin"):
+        
+        if g_data.get("xmin") is not None and u_data.get("xmin") is not None:
             g_xmin, g_xmax = g_data["xmin"], g_data["xmax"]
             g_ymin, g_ymax = g_data["ymin"], g_data["ymax"]
-
+            
             u_xmin, u_xmax = u_data["xmin"], u_data["xmax"]
             u_ymin, u_ymax = u_data["ymin"], u_data["ymax"]
-
+            
+            # Check for standard valid coordinate box sizes to avoid divide by zero
             if abs(g_xmax - g_xmin) > 1e-6 and abs(g_ymax - g_ymin) > 1e-6:
                 pct_x = (lon - g_xmin) / (g_xmax - g_xmin)
                 pct_y = (lat - g_ymin) / (g_ymax - g_ymin)
-
+                
                 x_utm = u_xmin + pct_x * (u_xmax - u_xmin)
                 y_utm = u_ymin + pct_y * (u_ymax - u_ymin)
-
+                
+                # 3. Call getPlotAtXY with native UTM coordinates
                 url_plot = f"{BHUNAKSHA_URL}/rest/MapInfo/getPlotAtXY"
                 r_plot = safe_post(url_plot, data={
                     "state": state,
@@ -253,9 +269,9 @@ def get_plot_at_gps():
                     "x": str(x_utm),
                     "y": str(y_utm)
                 }, headers=headers)
-
+                
                 return Response(r_plot.text, status=r_plot.status_code, content_type=r_plot.headers.get("Content-Type"))
-
+                    
         return jsonify({"error": "Failed to map extent coordinates"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -293,344 +309,522 @@ def proxy_wms():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ---- Phase 2 Helper Functions ----
-
-def get_extent_pair(state, levels):
-    gps_key = f"{state}_{levels}_4326"
-    utm_key = f"{state}_{levels}_0"
-
-    headers = get_proxy_headers(content_type="application/x-www-form-urlencoded; charset=UTF-8")
-
-    if gps_key in vvvv_extent_cache:
-        g_data = vvvv_extent_cache[gps_key]
-    else:
-        r_gps = safe_post(f"{BHUNAKSHA_URL}/rest/MapInfo/getVVVVExtentGeoref", data={
-            "state": state, "gisLevels": levels, "srs": "4326"
-        }, headers=headers)
-        g_data = r_gps.json() if r_gps.status_code == 200 else {}
-        if g_data:
-            vvvv_extent_cache[gps_key] = g_data
-            save_json_cache(EXTENT_CACHE_FILE, vvvv_extent_cache)
-
-    if utm_key in vvvv_extent_cache:
-        u_data = vvvv_extent_cache[utm_key]
-    else:
-        r_utm = safe_post(f"{BHUNAKSHA_URL}/rest/MapInfo/getVVVVExtentGeoref", data={
-            "state": state, "gisLevels": levels, "srs": "0"
-        }, headers=headers)
-        u_data = r_utm.json() if r_utm.status_code == 200 else {}
-        if u_data:
-            vvvv_extent_cache[utm_key] = u_data
-            save_json_cache(EXTENT_CACHE_FILE, vvvv_extent_cache)
-
-    return g_data, u_data
-
-
-def utm_to_gps(x, y, state, levels):
-    g_data, u_data = get_extent_pair(state, levels)
-    if not (g_data.get("xmin") and u_data.get("xmin")):
-        return None, None
-
-    u_xmin, u_xmax = u_data["xmin"], u_data["xmax"]
-    u_ymin, u_ymax = u_data["ymin"], u_data["ymax"]
-    g_xmin, g_xmax = g_data["xmin"], g_data["xmax"]
-    g_ymin, g_ymax = g_data["ymin"], g_data["ymax"]
-
-    if abs(u_xmax - u_xmin) < 1e-6 or abs(u_ymax - u_ymin) < 1e-6:
-        return None, None
-
-    pct_x = (x - u_xmin) / (u_xmax - u_xmin)
-    pct_y = (y - u_ymin) / (u_ymax - u_ymin)
-
-    lon = g_xmin + pct_x * (g_xmax - g_xmin)
-    lat = g_ymin + pct_y * (g_ymax - g_ymin)
-    return lon, lat
-
-
-def compute_segments(vertices_gps, ref_lat=None):
-    segments = []
-    n = len(vertices_gps)
-    if n < 2:
-        return segments
-    if ref_lat is None:
-        ref_lat = sum(v.get('lat', v.get('y', 0)) for v in vertices_gps) / n
-    lat_rad = math.radians(ref_lat)
-    m_per_deg_lon = 111320.0 * math.cos(lat_rad)
-    m_per_deg_lat = 111320.0
-    for i in range(n):
-        lon1 = vertices_gps[i].get('lon', vertices_gps[i].get('x', 0))
-        lat1 = vertices_gps[i].get('lat', vertices_gps[i].get('y', 0))
-        lon2 = vertices_gps[(i + 1) % n].get('lon', vertices_gps[(i + 1) % n].get('x', 0))
-        lat2 = vertices_gps[(i + 1) % n].get('lat', vertices_gps[(i + 1) % n].get('y', 0))
-        dx_m = (lon2 - lon1) * m_per_deg_lon
-        dy_m = (lat2 - lat1) * m_per_deg_lat
-        length = math.sqrt(dx_m * dx_m + dy_m * dy_m)
-        bearing = math.degrees(math.atan2(dx_m, dy_m)) % 360
-        segments.append({
-            'start': i,
-            'end': (i + 1) % n,
-            'length_m': round(length, 2),
-            'bearing': round(bearing, 2)
-        })
-    return segments
-
-
-def parcel_to_dict(parcel):
-    vertices = []
-    for v in parcel.vertices:
-        vertices.append({
-            "seq": v.sequence_order,
-            "x": v.x,
-            "y": v.y,
-            "lon": v.lon,
-            "lat": v.lat
-        })
-
-    gps_coords = [{"lon": v.lon, "lat": v.lat} for v in parcel.vertices]
-    ref_lat = sum(v.lat for v in parcel.vertices) / len(parcel.vertices) if parcel.vertices else None
-    segments = compute_segments(gps_coords, ref_lat)
-
-    owners = []
-    if parcel.owner_names:
-        try:
-            owners = json.loads(parcel.owner_names)
-        except (json.JSONDecodeError, TypeError):
-            owners = [parcel.owner_names]
-
-    report_info = None
-    if parcel.report:
-        report_info = {
-            "report_url": parcel.report.report_url,
-            "local_filename": parcel.report.local_filename
-        }
-
-    return {
-        "parcel": {
-            "id": parcel.id,
-            "giscode": parcel.giscode,
-            "plot_id": parcel.plot_id,
-            "plot_no": parcel.plot_no,
-            "khata_no": parcel.khata_no,
-            "pniu": parcel.pniu,
-            "area_acres": parcel.area_acres,
-            "area_hectares": parcel.area_hectares,
-            "area_sqm": parcel.area_sqm,
-            "perimeter_m": parcel.perimeter_m,
-            "lat": parcel.lat,
-            "lon": parcel.lon,
-            "owner_names": owners,
-            "district": parcel.district_name,
-            "subdivision": parcel.subdivision_name,
-            "circle": parcel.circle_name,
-            "mouza": parcel.mouza_name,
-            "sheet_no": parcel.sheet_no,
-            "vertex_count": parcel.vertex_count,
-            "longest_side_m": parcel.longest_side_m,
-            "shortest_side_m": parcel.shortest_side_m
-        },
-        "vertices": vertices,
-        "segments": segments,
-        "report": report_info
-    }
-
-
-# ---- Phase 2 Endpoints ----
-
 @app.route("/proxy/MapInfo/getPlotDetailsAndInspection", methods=["POST"])
-def proxy_plot_details():
+def get_plot_details_and_inspection():
     data = request.form.to_dict()
     state = data.get("state", "10")
-    giscode = data.get("giscode", "").strip()
-    plot_no = data.get("plot_no", "").strip()
-    levels = data.get("levels", "")
-    click_lon = data.get("click_lon")
-    click_lat = data.get("click_lat")
-    plot_id = data.get("plot_id", "")
-
-    if not giscode or not plot_no:
-        return jsonify({"error": "giscode and plot_no are required"}), 400
-
-    parcel = Parcel.query.filter_by(giscode=giscode, plot_no=plot_no).first()
-    if parcel:
-        return jsonify(parcel_to_dict(parcel))
-
-    district_name = data.get("district_name", "")
-    subdivision_name = data.get("subdivision_name", "")
-    circle_name = data.get("circle_name", "")
-    mouza_name = data.get("mouza_name", "")
-    sheet_no = data.get("sheet_no", "")
-
-    vertices_gps = []
-    vertices_utm = []
-    area_sqm = 0.0
-    perimeter_m = 0.0
-
-    if click_lon and click_lat:
-        try:
-            clon = float(click_lon)
-            clat = float(click_lat)
-
-            est_size = 15.0
-            try:
-                g_data, u_data = get_extent_pair(state, levels)
-                if u_data.get("xmin") and u_data.get("ymin"):
-                    u_range = min(abs(u_data.get("xmax",0)-u_data.get("xmin",0)),
-                                  abs(u_data.get("ymax",0)-u_data.get("ymin",0)))
-                    if u_range > 100:
-                        est_size = max(10, u_range / 500)
-            except Exception:
-                pass
-
-            deg_per_m_lat = 1.0 / 111320.0
-            deg_per_m_lon = 1.0 / (111320.0 * math.cos(math.radians(clat)))
-            dlon = est_size * deg_per_m_lon
-            dlat = est_size * deg_per_m_lat
-
-            coords_gps = [
-                (clon - dlon, clat - dlat),
-                (clon + dlon, clat - dlat),
-                (clon + dlon, clat + dlat),
-                (clon - dlon, clat + dlat),
-            ]
-            for i, (lon, lat) in enumerate(coords_gps):
-                vertices_gps.append({"lon": lon, "lat": lat, "seq": i})
-                vertices_utm.append({"x": lon, "y": lat, "seq": i})
-
-            s = est_size * 2
-            area_sqm = s * s
-            perimeter_m = 4 * s
-        except Exception as e:
-            print(f"Geometry generation error: {e}")
-            vertices_gps = []
-            vertices_utm = []
-
-    ref_lat = float(click_lat) if click_lat else None
-    segments = compute_segments(vertices_gps, ref_lat) if vertices_gps else []
-    lengths = [s['length_m'] for s in segments]
-    longest_side = max(lengths) if lengths else 0
-    shortest_side = min(lengths) if lengths else 0
-    area_hectares = area_sqm / 10000.0 if area_sqm else 0
-    area_acres_val = area_sqm / 4046.86 if area_sqm else 0
-
+    giscode = data.get("giscode")
+    plot_no = data.get("plot_no")
+    levels = data.get("levels")
+    
+    if not giscode or not plot_no or not levels:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+        
+    levels_parts = [p.strip() for p in levels.split(",") if p.strip()]
+    if len(levels_parts) < 7:
+        return jsonify({"success": False, "error": "Invalid levels format"}), 400
+        
+    dist_code = levels_parts[0]
+    subdiv_code = levels_parts[1]
+    circle_code = levels_parts[2]
+    mouza_code = levels_parts[3]
+    survey_code = levels_parts[4]
+    mapinst_code = levels_parts[5]
+    sheet_code = levels_parts[6]
+    
+    # Check SQLite DB first
     try:
-        new_parcel = Parcel(
-            giscode=giscode,
-            plot_id=plot_id,
-            plot_no=plot_no,
-            area_acres=round(area_acres_val, 4),
-            area_hectares=round(area_hectares, 4),
-            area_sqm=round(area_sqm, 2),
-            perimeter_m=round(perimeter_m, 2),
-            lat=float(click_lat) if click_lat else None,
-            lon=float(click_lon) if click_lon else None,
-            district_name=district_name,
-            subdivision_name=subdivision_name,
-            circle_name=circle_name,
-            mouza_name=mouza_name,
-            sheet_no=sheet_no,
-            vertex_count=len(vertices_gps),
-            longest_side_m=round(longest_side, 2),
-            shortest_side_m=round(shortest_side, 2)
-        )
-        db.session.add(new_parcel)
-        db.session.flush()
+        parcel = Parcel.query.filter_by(
+            district=dist_code,
+            subdivision=subdiv_code,
+            circle=circle_code,
+            mouza=mouza_code,
+            survey=survey_code,
+            mapinst=mapinst_code,
+            sheet_no=sheet_code,
+            plot_no=plot_no
+        ).first()
+        
+        if parcel:
+            vertices_list = [{
+                "x": v.x, "y": v.y, "lon": v.lon, "lat": v.lat, "sequence_order": v.sequence_order
+            } for v in sorted(parcel.vertices, key=lambda x: x.sequence_order)]
+            
+            segments_list = [{
+                "start_vertex": s.start_vertex_index,
+                "end_vertex": s.end_vertex_index,
+                "length_meters": s.length_meters,
+                "bearing": s.bearing
+            } for s in parcel.segments]
+            
+            report_url = parcel.report.report_url if parcel.report else ""
+            if report_url:
+                rel_path = report_url.lstrip("/")
+                if not os.path.exists(rel_path):
+                    try:
+                        url_geom = f"{BHUNAKSHA_URL}/rest/MapInfo/getPlotInfo"
+                        geom_headers = get_proxy_headers(content_type="application/x-www-form-urlencoded; charset=UTF-8")
+                        r_geom = session.post(url_geom, data={
+                            "state": state, "giscode": giscode, "plotno": plot_no
+                        }, headers=geom_headers, timeout=8)
+                        if r_geom and r_geom.status_code == 200:
+                            data_geom = r_geom.json()
+                            info_links = data_geom.get("infoLinks")
+                            if info_links:
+                                soup_links = BeautifulSoup(info_links, "html.parser")
+                                a_tag = soup_links.find("a")
+                                if a_tag and a_tag.get("href"):
+                                    href = a_tag.get("href")
+                                    if href.startswith("../"):
+                                        remote_pdf_url = "/" + href[3:]
+                                    elif href.startswith("/"):
+                                        remote_pdf_url = href
+                                    else:
+                                        remote_pdf_url = "/10/" + href
+                                    full_pdf_url = f"{BHUNAKSHA_URL}{remote_pdf_url}"
+                                    pdf_r = session.get(full_pdf_url, headers={
+                                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                        "Referer": f"{BHUNAKSHA_URL}/10/indexmain.jsp"
+                                    }, timeout=8)
+                                    if pdf_r and pdf_r.status_code == 200:
+                                        os.makedirs("static/reports", exist_ok=True)
+                                        with open(rel_path, "wb") as f_pdf:
+                                            f_pdf.write(pdf_r.content)
+                    except Exception as redownload_err:
+                        print("Failed to redownload missing PDF:", redownload_err)
+            
+            p_lat = parcel.lat
+            p_lon = parcel.lon
+            if p_lat is not None and p_lon is not None:
+                if abs(p_lat) > 180 or abs(p_lon) > 180:
+                    gps_cache_key = f"{state}_{levels}_4326"
+                    utm_cache_key = f"{state}_{levels}_0"
+                    gps_extent = vvvv_extent_cache.get(gps_cache_key)
+                    utm_extent = vvvv_extent_cache.get(utm_cache_key)
+                    if gps_extent and utm_extent:
+                        g_xmin, g_xmax = gps_extent["xmin"], gps_extent["xmax"]
+                        g_ymin, g_ymax = gps_extent["ymin"], gps_extent["ymax"]
+                        u_xmin, u_xmax = utm_extent["xmin"], utm_extent["xmax"]
+                        u_ymin, u_ymax = utm_extent["ymin"], utm_extent["ymax"]
+                        
+                        pct_x = (p_lon - u_xmin) / (u_xmax - u_xmin) if (u_xmax - u_xmin) > 0 else 0.5
+                        pct_y = (p_lat - u_ymin) / (u_ymax - u_ymin) if (u_ymax - u_ymin) > 0 else 0.5
+                        p_lon = g_xmin + pct_x * (g_xmax - g_xmin)
+                        p_lat = g_ymin + pct_y * (g_ymax - g_ymin)
 
-        for v in vertices_gps:
-            db.session.add(ParcelVertex(
-                parcel_id=new_parcel.id,
-                x=v.get('x', 0), y=v.get('y', 0),
-                lon=v['lon'], lat=v['lat'],
-                sequence_order=v['seq']
-            ))
+            return jsonify({
+                "success": True,
+                "cached": True,
+                "parcel": {
+                    "id": parcel.id,
+                    "plot_id": parcel.plot_id,
+                    "plot_no": parcel.plot_no,
+                    "khata_no": parcel.khata_no,
+                    "pniu": parcel.pniu,
+                    "area": parcel.area,
+                    "area_acres": parcel.area / 4046.8564 if parcel.area else 0.0,
+                    "perimeter": parcel.perimeter,
+                    "lat": p_lat,
+                    "lon": p_lon,
+                    "district": parcel.district,
+                    "subdivision": parcel.subdivision,
+                    "circle": parcel.circle,
+                    "mouza": parcel.mouza,
+                    "survey": parcel.survey,
+                    "mapinst": parcel.mapinst,
+                    "sheet_no": parcel.sheet_no,
+                    "owner_names": json.loads(parcel.owner_names) if parcel.owner_names else [],
+                    "num_vertices": len(vertices_list)
+                },
+                "vertices": vertices_list,
+                "segments": segments_list,
+                "report": {"url": report_url}
+            })
+    except Exception as db_err:
+        print("DB query error:", db_err)
+    
+    # Build response with whatever data we can fetch (all remote calls are non-fatal)
+    new_parcel = None
+    plot_id = plot_no
+    khata_no = ""
+    pniu = None
+    owner_names = []
+    centroid_lon = None
+    centroid_lat = None
+    area_sqm = None
+    perimeter_m = None
+    vertices_list = []
+    segments_list = []
+    local_report_url = ""
+    
+    # Helper for robust metadata calls
+    def meta_get(url, params=None, headers=None):
+        try:
+            return safe_get(url, params=params, headers=headers or get_proxy_headers())
+        except Exception as e:
+            print(f"meta_get exception for {url}: {e}")
+            return None
 
-        db.session.commit()
-        return jsonify(parcel_to_dict(new_parcel))
+    def meta_post(url, data=None, headers=None):
+        try:
+            return safe_post(url, data=data, headers=headers or get_proxy_headers())
+        except Exception as e:
+            print(f"meta_post exception for {url}: {e}")
+            return None
+
+    # 1. Try to fetch metadata from ScalarDatahandler (non-fatal, fast-fail)
+    try:
+        url_scalar = f"{BHUNAKSHA_URL}/ScalarDatahandler"
+        params_scalar = {"OP": "5", "state": state, "levels": levels, "plotno": plot_no}
+        r_scalar = meta_get(url_scalar, params=params_scalar, headers=get_proxy_headers(content_type=None))
+        
+        if r_scalar and r_scalar.status_code == 200:
+            data_scalar = r_scalar.json()
+            if data_scalar.get("has_data") == "Y":
+                plot_id = data_scalar.get("ID") or plot_id
+                pniu = data_scalar.get("PNIU") or pniu
+                
+            if not plot_id or plot_id == plot_no:
+                plot_id = data_scalar.get("ID") or plot_id
+            if not pniu:
+                pniu = data_scalar.get("PNIU") or pniu
+                
+            html_info = data_scalar.get("info", "")
+            if html_info:
+                soup = BeautifulSoup(html_info, "html.parser")
+                rows = soup.find_all("tr")
+                mode = None
+                for row in rows:
+                    th = row.find("th")
+                    if th:
+                        text = th.get_text().strip()
+                        if "रैयत का नाम" in text:
+                            mode = "owners"
+                        elif "खाता संख्या" in text:
+                            mode = "khata"
+                        continue
+                    tds = row.find_all("td")
+                    if not tds:
+                        continue
+                    if mode == "owners" and len(tds) >= 2:
+                        owner_names.append(tds[1].get_text().strip())
+                    elif mode == "khata":
+                        khata_no = tds[0].get_text().strip()
+                        
+            try:
+                xmin = float(data_scalar.get("xmin", 0))
+                xmax = float(data_scalar.get("xmax", 0))
+                ymin = float(data_scalar.get("ymin", 0))
+                ymax = float(data_scalar.get("ymax", 0))
+                if xmin or xmax or ymin or ymax:
+                    centroid_lon = (xmin + xmax) / 2.0
+                    centroid_lat = (ymin + ymax) / 2.0
+            except (TypeError, ValueError):
+                pass
     except Exception as e:
-        db.session.rollback()
-        print(f"DB save error: {e}")
-        return jsonify({"error": "Failed to save parcel data"}), 500
+        print("ScalarDatahandler error:", e)
+    
+    # 2. Try to fetch geometry and metadata from getPlotInfo (non-fatal, fast-fail)
+    try:
+        url_geom = f"{BHUNAKSHA_URL}/rest/MapInfo/getPlotInfo"
+        geom_headers = get_proxy_headers(content_type="application/x-www-form-urlencoded; charset=UTF-8")
+        r_geom = meta_post(url_geom, data={
+            "state": state, "giscode": giscode, "plotno": plot_no
+        }, headers=geom_headers)
+        
+        if r_geom and r_geom.status_code == 200:
+            data_geom = r_geom.json()
+            
+            if not plot_id or plot_id == plot_no:
+                plot_id = data_geom.get("plotid") or plot_id
+                
+            if centroid_lat is None or centroid_lon is None:
+                try:
+                    centroid_lon = (float(data_geom.get("xmin", 0)) + float(data_geom.get("xmax", 0))) / 2.0
+                    centroid_lat = (float(data_geom.get("ymin", 0)) + float(data_geom.get("ymax", 0))) / 2.0
+                except (TypeError, ValueError):
+                    pass
+            
+            geom_wkt = data_geom.get("the_geom") or data_geom.get("geom")
+            if geom_wkt and "POLYGON" in geom_wkt:
+                poly = shapely.wkt.loads(geom_wkt)
+                area_sqm = poly.area
+                perimeter_m = poly.length
+                raw_coords = list(poly.exterior.coords)
+                
+                # Load GPS and UTM extents for coordinate conversion
+                gps_extent = utm_extent = None
+                gps_cache_key = f"{state}_{levels}_4326"
+                utm_cache_key = f"{state}_{levels}_0"
+                
+                gps_extent = vvvv_extent_cache.get(gps_cache_key)
+                if not gps_extent:
+                    try:
+                        r_gps = meta_post(f"{BHUNAKSHA_URL}/rest/MapInfo/getVVVVExtentGeoref", data={
+                            "state": state, "gisLevels": levels, "srs": "4326"
+                        }, headers=geom_headers)
+                        gps_extent = r_gps.json() if r_gps and r_gps.status_code == 200 else None
+                        if gps_extent:
+                            vvvv_extent_cache[gps_cache_key] = gps_extent
+                            save_json_cache(EXTENT_CACHE_FILE, vvvv_extent_cache)
+                    except Exception:
+                        pass
+                
+                utm_extent = vvvv_extent_cache.get(utm_cache_key)
+                if not utm_extent:
+                    try:
+                        r_utm = meta_post(f"{BHUNAKSHA_URL}/rest/MapInfo/getVVVVExtentGeoref", data={
+                            "state": state, "gisLevels": levels, "srs": "0"
+                        }, headers=geom_headers)
+                        utm_extent = r_utm.json() if r_utm and r_utm.status_code == 200 else None
+                        if utm_extent:
+                            vvvv_extent_cache[utm_cache_key] = utm_extent
+                            save_json_cache(EXTENT_CACHE_FILE, vvvv_extent_cache)
+                    except Exception:
+                        pass
+                
+                if gps_extent and utm_extent:
+                    g_xmin, g_xmax = gps_extent["xmin"], gps_extent["xmax"]
+                    g_ymin, g_ymax = gps_extent["ymin"], gps_extent["ymax"]
+                    u_xmin, u_xmax = utm_extent["xmin"], utm_extent["xmax"]
+                    u_ymin, u_ymax = utm_extent["ymin"], utm_extent["ymax"]
+                    
+                    def map_utm_to_gps(x, y):
+                        pct_x = (x - u_xmin) / (u_xmax - u_xmin) if (u_xmax - u_xmin) > 0 else 0.5
+                        pct_y = (y - u_ymin) / (u_ymax - u_ymin) if (u_ymax - u_ymin) > 0 else 0.5
+                        lon = g_xmin + pct_x * (g_xmax - g_xmin)
+                        lat = g_ymin + pct_y * (g_ymax - g_ymin)
+                        return lon, lat
+                    
+                    for i, (x_utm, y_utm) in enumerate(raw_coords):
+                        lon_gps, lat_gps = map_utm_to_gps(x_utm, y_utm)
+                        vertices_list.append({
+                            "x": x_utm, "y": y_utm, "lon": lon_gps, "lat": lat_gps, "sequence_order": i
+                        })
+                    
+                    for i in range(len(raw_coords) - 1):
+                        p1 = raw_coords[i]
+                        p2 = raw_coords[i+1]
+                        dx = p2[0] - p1[0]
+                        dy = p2[1] - p1[1]
+                        length = math.sqrt(dx*dx + dy*dy)
+                        bearing = math.atan2(dx, dy) * 180 / math.pi
+                        bearing = (bearing + 360) % 360
+                        segments_list.append({
+                            "start_vertex": i, "end_vertex": i+1, "length_meters": length, "bearing": bearing
+                        })
+                
+                # Also try to get PDF report
+                try:
+                    info_links = data_geom.get("infoLinks")
+                    if info_links:
+                        soup_links = BeautifulSoup(info_links, "html.parser")
+                        a_tag = soup_links.find("a")
+                        if a_tag and a_tag.get("href"):
+                            href = a_tag.get("href")
+                            if href.startswith("../"):
+                                remote_pdf_url = "/" + href[3:]
+                            elif href.startswith("/"):
+                                remote_pdf_url = href
+                            else:
+                                remote_pdf_url = "/10/" + href
+                            full_pdf_url = f"{BHUNAKSHA_URL}{remote_pdf_url}"
+                            pdf_r = meta_get(full_pdf_url, headers={
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                "Referer": f"{BHUNAKSHA_URL}/10/indexmain.jsp"
+                            })
+                            if pdf_r and pdf_r.status_code == 200:
+                                os.makedirs("static/reports", exist_ok=True)
+                                filename = f"{giscode}_{plot_no}.pdf"
+                                filepath = os.path.join("static", "reports", filename)
+                                with open(filepath, "wb") as f_pdf:
+                                    f_pdf.write(pdf_r.content)
+                                local_report_url = f"/static/reports/{filename}"
+                except Exception as report_err:
+                    print("PDF download error:", report_err)
+                    
+    except Exception as e:
+        print("getPlotInfo error:", e)
+    
+    # Cache whatever we got in the database
+    if vertices_list:
+        try:
+            new_parcel = Parcel(
+                plot_id=plot_id,
+                plot_no=plot_no,
+                khata_no=khata_no,
+                pniu=pniu,
+                area=area_sqm,
+                perimeter=perimeter_m,
+                lat=centroid_lat,
+                lon=centroid_lon,
+                district=dist_code,
+                subdivision=subdiv_code,
+                circle=circle_code,
+                mouza=mouza_code,
+                survey=survey_code,
+                mapinst=mapinst_code,
+                sheet_no=sheet_code,
+                owner_names=json.dumps(owner_names, ensure_ascii=False)
+            )
+            db.session.add(new_parcel)
+            db.session.flush()
+            
+            for v in vertices_list:
+                db.session.add(ParcelVertex(
+                    parcel_id=new_parcel.id, x=v["x"], y=v["y"],
+                    lon=v["lon"], lat=v["lat"], sequence_order=v["sequence_order"]
+                ))
+            for s in segments_list:
+                db.session.add(BoundarySegment(
+                    parcel_id=new_parcel.id,
+                    start_vertex_index=s["start_vertex"],
+                    end_vertex_index=s["end_vertex"],
+                    length_meters=s["length_meters"],
+                    bearing=s["bearing"]
+                ))
+            if local_report_url:
+                db.session.add(LdmReport(
+                    parcel_id=new_parcel.id,
+                    report_url=local_report_url,
+                    filename=f"{giscode}_{plot_no}.pdf"
+                ))
+            db.session.commit()
+        except Exception as commit_err:
+            db.session.rollback()
+            print("DB cache error:", commit_err)
+    # Convert centroid coordinate to GPS if it is currently in UTM
+    if centroid_lon is not None and centroid_lat is not None:
+        if abs(centroid_lon) > 180 or abs(centroid_lat) > 180:
+            gps_cache_key = f"{state}_{levels}_4326"
+            utm_cache_key = f"{state}_{levels}_0"
+            gps_extent = vvvv_extent_cache.get(gps_cache_key)
+            utm_extent = vvvv_extent_cache.get(utm_cache_key)
+            if gps_extent and utm_extent:
+                g_xmin, g_xmax = gps_extent["xmin"], gps_extent["xmax"]
+                g_ymin, g_ymax = gps_extent["ymin"], gps_extent["ymax"]
+                u_xmin, u_xmax = utm_extent["xmin"], utm_extent["xmax"]
+                u_ymin, u_ymax = utm_extent["ymin"], utm_extent["ymax"]
+                
+                pct_x = (centroid_lon - u_xmin) / (u_xmax - u_xmin) if (u_xmax - u_xmin) > 0 else 0.5
+                pct_y = (centroid_lat - u_ymin) / (u_ymax - u_ymin) if (u_ymax - u_ymin) > 0 else 0.5
+                centroid_lon = g_xmin + pct_x * (g_xmax - g_xmin)
+                centroid_lat = g_ymin + pct_y * (g_ymax - g_ymin)
 
+    return jsonify({
+        "success": True,
+        "cached": False,
+        "parcel": {
+            "id": new_parcel.id if (new_parcel and new_parcel.id) else None,
+            "plot_id": plot_id,
+            "plot_no": plot_no,
+            "khata_no": khata_no,
+            "pniu": pniu,
+            "area": area_sqm,
+            "area_acres": area_sqm / 4046.8564 if area_sqm else None,
+            "perimeter": perimeter_m,
+            "lat": centroid_lat,
+            "lon": centroid_lon,
+            "district": dist_code,
+            "subdivision": subdiv_code,
+            "circle": circle_code,
+            "mouza": mouza_code,
+            "survey": survey_code,
+            "mapinst": mapinst_code,
+            "sheet_no": sheet_code,
+            "owner_names": owner_names,
+            "num_vertices": len(vertices_list)
+        },
+        "vertices": vertices_list,
+        "segments": segments_list,
+        "report": {"url": local_report_url}
+    })
 
-@app.route("/proxy/Export/GeoJSON/<giscode>/<plot_no>")
-def export_geojson(giscode, plot_no):
-    parcel = Parcel.query.filter_by(giscode=giscode, plot_no=plot_no).first()
+@app.route("/proxy/Export/GeoJSON/<plot_no>", methods=["GET"])
+def export_geojson(plot_no):
+    parcel_id = request.args.get("parcel_id")
+    if parcel_id and parcel_id not in ("null", "undefined", ""):
+        parcel = Parcel.query.get(parcel_id)
+    else:
+        parcel = Parcel.query.filter_by(plot_no=plot_no).order_by(Parcel.id.desc()).first()
+        
     if not parcel:
-        return jsonify({"error": "Parcel not found in cache"}), 404
-
-    vertices = sorted(parcel.vertices, key=lambda v: v.sequence_order)
-    ring = [[v.lon, v.lat] for v in vertices]
-    ring.append(ring[0])
-
+        return jsonify({"error": "Parcel not found"}), 404
+        
+    coords = [[v.lon, v.lat] for v in sorted(parcel.vertices, key=lambda x: x.sequence_order)]
+    if coords and coords[0] != coords[-1]:
+        coords.append(coords[0])
+        
     geojson = {
         "type": "Feature",
         "geometry": {
             "type": "Polygon",
-            "coordinates": [ring]
+            "coordinates": [coords]
         },
         "properties": {
             "plot_no": parcel.plot_no,
+            "plot_id": parcel.plot_id,
             "khata_no": parcel.khata_no,
             "pniu": parcel.pniu,
-            "area_acres": parcel.area_acres,
-            "area_sqm": parcel.area_sqm,
-            "perimeter_m": parcel.perimeter_m,
-            "district": parcel.district_name,
-            "mouza": parcel.mouza_name
+            "area_sqm": parcel.area,
+            "area_acres": parcel.area / 4046.8564 if parcel.area else 0.0,
+            "perimeter_meters": parcel.perimeter,
+            "owner_names": json.loads(parcel.owner_names) if parcel.owner_names else [],
+            "district": parcel.district,
+            "circle": parcel.circle,
+            "mouza": parcel.mouza,
+            "sheet_no": parcel.sheet_no
         }
     }
+    response = jsonify(geojson)
+    response.headers["Content-Disposition"] = f"attachment; filename=plot_{plot_no}.geojson"
+    return response
 
-    return Response(
-        json.dumps(geojson, ensure_ascii=False, indent=2),
-        mimetype="application/geo+json",
-        headers={"Content-Disposition": f"attachment; filename={giscode}_{plot_no}.geojson"}
-    )
-
-
-@app.route("/proxy/Export/CSV/<giscode>/<plot_no>")
-def export_csv(giscode, plot_no):
-    parcel = Parcel.query.filter_by(giscode=giscode, plot_no=plot_no).first()
+@app.route("/proxy/Export/CSV/<plot_no>", methods=["GET"])
+def export_csv(plot_no):
+    parcel_id = request.args.get("parcel_id")
+    if parcel_id and parcel_id not in ("null", "undefined", ""):
+        parcel = Parcel.query.get(parcel_id)
+    else:
+        parcel = Parcel.query.filter_by(plot_no=plot_no).order_by(Parcel.id.desc()).first()
+        
     if not parcel:
-        return jsonify({"error": "Parcel not found in cache"}), 404
-
-    vertices = sorted(parcel.vertices, key=lambda v: v.sequence_order)
-    utm_coords = [{"x": v.x, "y": v.y} for v in vertices]
-    segments = compute_segments(utm_coords)
-
+        return "Parcel not found", 404
+        
+    import io
+    import csv
+    
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Vertex", "X_UTM", "Y_UTM", "Longitude", "Latitude", "Side_Length_m", "Bearing_deg"])
-
-    for i, v in enumerate(vertices):
-        seg = segments[i] if i < len(segments) else None
-        writer.writerow([
-            i + 1,
-            round(v.x, 4),
-            round(v.y, 4),
-            round(v.lon, 6),
-            round(v.lat, 6),
-            seg['length_m'] if seg else '',
-            seg['bearing'] if seg else ''
-        ])
-
+    
+    writer.writerow(["Bhu-Overlay Parcel Boundary Data"])
+    writer.writerow(["Plot Number", parcel.plot_no])
+    writer.writerow(["Plot ID", parcel.plot_id])
+    writer.writerow(["Khata Number", parcel.khata_no])
+    writer.writerow(["PNIU Code", parcel.pniu])
+    writer.writerow(["Area (Sq Meters)", parcel.area])
+    writer.writerow(["Area (Acres)", parcel.area / 4046.8564 if parcel.area else 0.0])
+    writer.writerow(["Perimeter (Meters)", parcel.perimeter])
+    writer.writerow(["Owners", ", ".join(json.loads(parcel.owner_names) if parcel.owner_names else [])])
+    writer.writerow([])
+    
+    writer.writerow(["Vertices Coordinates"])
+    writer.writerow(["Sequence Order", "UTM Easting (X)", "UTM Northing (Y)", "Longitude", "Latitude"])
+    for v in sorted(parcel.vertices, key=lambda x: x.sequence_order):
+        writer.writerow([v.sequence_order, v.x, v.y, v.lon, v.lat])
+    writer.writerow([])
+    
+    writer.writerow(["Boundary Segments Side Lengths"])
+    writer.writerow(["Start Vertex", "End Vertex", "Length (Meters)", "Bearing (Degrees)"])
+    for s in parcel.segments:
+        writer.writerow([s.start_vertex_index, s.end_vertex_index, s.length_meters, s.bearing])
+        
+    csv_data = output.getvalue()
     return Response(
-        output.getvalue().encode('utf-8'),
+        csv_data,
         mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={giscode}_{plot_no}.csv"}
+        headers={"Content-Disposition": f"attachment; filename=plot_{plot_no}_boundary.csv"}
     )
 
-
-@app.route("/proxy/Reports/<giscode>/<plot_no>")
-def serve_report(giscode, plot_no):
-    parcel = Parcel.query.filter_by(giscode=giscode, plot_no=plot_no).first()
-    if not parcel or not parcel.report:
-        return jsonify({"error": "Report not found"}), 404
-
-    local_path = os.path.join("static", parcel.report.local_filename)
-    if not os.path.exists(local_path):
-        return jsonify({"error": "PDF file not found on disk"}), 404
-
-    return send_file(local_path, mimetype="application/pdf")
-
-
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)
+    app.run(host="127.0.0.1", port=5001, debug=True, use_reloader=False)
