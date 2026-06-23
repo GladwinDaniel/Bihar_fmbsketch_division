@@ -1,0 +1,16 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local JSON caches for BhuNaksha
+dropdown_cache.json
+extent_cache.json
+local_proxy_response.json
+
+# IDE / OS files
+.vscode/
+.idea/
+Thumbs.db
+ehthumbs.db
+Desktop.ini

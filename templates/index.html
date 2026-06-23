@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bihar Cadastral Map & Satellite Dashboard</title>
+    
+    <!-- OpenLayers CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/openlayers/openlayers.github.io@master/en/v6.15.1/css/ol.css" type="text/css">
+    
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <!-- Sidebar Toggle (Floating button on small screens) -->
+    <button class="float-toggle" id="sidebar-toggle-float">
+        <i class="fa fa-bars"></i>
+    </button>
+
+    <!-- Sidebar Panel -->
+    <div class="sidebar" id="sidebar">
+        <!-- Logo and Toggle Header -->
+        <div class="sidebar-header">
+            <div class="logo-container">
+                <i class="fa fa-map logo-icon"></i>
+                <span class="logo-text">Bhu-Overlay</span>
+            </div>
+            <button class="collapse-btn" id="sidebar-toggle-collapse">
+                <i class="fa fa-chevron-left" id="collapse-icon"></i>
+            </button>
+        </div>
+
+        <!-- Sidebar Content -->
+        <div class="sidebar-content">
+            <!-- Location Filters Panel -->
+            <div class="form-section">
+                <h3 class="section-title"><i class="fa fa-globe"></i> Location Selector</h3>
+                <div class="panel-card">
+                    <!-- District Select -->
+                    <div class="form-group">
+                        <label class="form-label" for="select-district">District</label>
+                        <div class="select-wrapper">
+                            <select id="select-district">
+                                <option value="">--Select District--</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Subdivision Select -->
+                    <div class="form-group">
+                        <label class="form-label" for="select-subdiv">Sub-Division</label>
+                        <div class="select-wrapper">
+                            <select id="select-subdiv" disabled>
+                                <option value="">--Select Subdivision--</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Circle Select -->
+                    <div class="form-group">
+                        <label class="form-label" for="select-circle">Circle</label>
+                        <div class="select-wrapper">
+                            <select id="select-circle" disabled>
+                                <option value="">--Select Circle--</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Mouza Select -->
+                    <div class="form-group">
+                        <label class="form-label" for="select-mouza">Mouza (Village)</label>
+                        <div class="select-wrapper">
+                            <select id="select-mouza" disabled>
+                                <option value="">--Select Mouza--</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Survey Type Select -->
+                    <div class="form-group">
+                        <label class="form-label" for="select-survey">Survey Type</label>
+                        <div class="select-wrapper">
+                            <select id="select-survey" disabled>
+                                <option value="">--Select Survey--</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Map Instance Select -->
+                    <div class="form-group">
+                        <label class="form-label" for="select-mapinst">Map Instance</label>
+                        <div class="select-wrapper">
+                            <select id="select-mapinst" disabled>
+                                <option value="">--Select Map--</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Sheet No Select -->
+                    <div class="form-group">
+                        <label class="form-label" for="select-sheet">Sheet Number</label>
+                        <div class="select-wrapper">
+                            <select id="select-sheet" disabled>
+                                <option value="">--Select Sheet--</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PNIU / Search Panel -->
+            <div class="form-section">
+                <h3 class="section-title"><i class="fa fa-search"></i> Search Land Parcel</h3>
+                <div class="panel-card">
+                    <!-- PNIU Search -->
+                    <div class="form-group">
+                        <label class="form-label" for="search-pniu">Search by PNIU Code</label>
+                        <div class="search-wrapper">
+                            <input type="text" id="search-pniu" placeholder="Enter 14-digit PNIU...">
+                            <button class="search-btn" id="btn-search-pniu">
+                                <i class="fa fa-search"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Opacity Control Card -->
+            <div class="form-section">
+                <h3 class="section-title"><i class="fa fa-sliders"></i> Map Layers</h3>
+                <div class="panel-card">
+                    <div class="slider-group">
+                        <div class="slider-header">
+                            <span>Cadastral Map Opacity</span>
+                            <span id="opacity-value">60%</span>
+                        </div>
+                        <div class="slider-container">
+                            <input type="range" id="opacity-slider" min="0" max="100" value="60">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Alignment Nudge Card -->
+            <div class="form-section">
+                <h3 class="section-title"><i class="fa fa-arrows"></i> Map Alignment (Nudge)</h3>
+                <div class="panel-card" style="align-items: center;">
+                    <div style="font-size: 0.8rem; color: var(--text-secondary); text-align: center; margin-bottom: 0.25rem; width: 100%;">
+                        Correct georeferencing shift (approx. meters)
+                    </div>
+                    <!-- Nudge D-Pad Controls -->
+                    <div style="display: grid; grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 40px); gap: 5px; justify-content: center; align-items: center;">
+                        <div></div>
+                        <button class="btn-primary" id="btn-nudge-up" style="width:40px; height:40px; padding:0; box-shadow:none;" title="Nudge Up"><i class="fa fa-arrow-up"></i></button>
+                        <div></div>
+                        <button class="btn-primary" id="btn-nudge-left" style="width:40px; height:40px; padding:0; box-shadow:none;" title="Nudge Left"><i class="fa fa-arrow-left"></i></button>
+                        <button class="btn-primary" id="btn-nudge-reset" style="width:40px; height:40px; padding:0; box-shadow:none; background:rgba(255,255,255,0.05); border:1px solid var(--border-color); color:var(--text-primary);" title="Reset Alignment"><i class="fa fa-refresh"></i></button>
+                        <button class="btn-primary" id="btn-nudge-right" style="width:40px; height:40px; padding:0; box-shadow:none;" title="Nudge Right"><i class="fa fa-arrow-right"></i></button>
+                        <div></div>
+                        <button class="btn-primary" id="btn-nudge-down" style="width:40px; height:40px; padding:0; box-shadow:none;" title="Nudge Down"><i class="fa fa-arrow-down"></i></button>
+                        <div></div>
+                    </div>
+                    <!-- Offset readout -->
+                    <div style="display: flex; justify-content: space-between; width: 100%; font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.5rem; border-top: 1px solid var(--border-color); padding-top: 0.5rem;">
+                        <span>Easting Shift: <span id="offset-x-meters">0.0m</span></span>
+                        <span>Northing Shift: <span id="offset-y-meters">0.0m</span></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Metadata details panel -->
+            <div class="form-section">
+                <h3 class="section-title"><i class="fa fa-info-circle"></i> Selection Details</h3>
+                <div class="panel-card" style="gap: 0.5rem;">
+                    <div class="detail-item">
+                        <span class="detail-label">Plot No:</span>
+                        <span class="detail-value" id="val-plot-no">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Plot ID:</span>
+                        <span class="detail-value" id="val-plot-id">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">PNIU Code:</span>
+                        <span class="detail-value" id="val-pniu">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Latitude:</span>
+                        <span class="detail-value" id="val-lat">--</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Longitude:</span>
+                        <span class="detail-value" id="val-lon">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scrap / Download Map Image -->
+            <button class="btn-primary" id="btn-download-map">
+                <i class="fa fa-download"></i> Scrape Cadastral Overlay
+            </button>
+        </div>
+    </div>
+
+    <!-- Map Area Layout -->
+    <div class="map-container">
+        <!-- OpenLayers Map Canvas -->
+        <div id="map"></div>
+
+        <!-- Custom Notification Toast -->
+        <div class="toast-notification" id="toast">
+            <i class="fa fa-exclamation-triangle toast-icon" id="toast-icon"></i>
+            <span class="toast-message" id="toast-message">Notification message here</span>
+        </div>
+
+        <!-- Loading Overlay -->
+        <div class="loading-overlay" id="loading">
+            <div class="spinner"></div>
+            <div class="loading-text" id="loading-text">Loading Cadastral Layers...</div>
+        </div>
+    </div>
+
+    <!-- External jQuery -->
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    
+    <!-- OpenLayers JS -->
+    <script src="https://cdn.jsdelivr.net/gh/openlayers/openlayers.github.io@master/en/v6.15.1/build/ol.js"></script>
+
+    <!-- Custom GIS Javascript -->
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
