@@ -5,6 +5,10 @@ let plotLyr;
 let selPlotLyr;
 let vectorSource;
 let vectorLayer;
+let osmVectorLayer;
+let kurraVectorLayer;
+let osmFeaturesCache = []; // To store trees/wells to pass to backend
+window.roadFrontage = null; // Store road explicitly
 let currentParcelData = null;
 let currentGisCode = "";
 let currentLevels = "";
@@ -175,10 +179,62 @@ function initMap() {
         style: vectorStyleFunction
     });
 
+    // OSM Nearby Features Layer
+    osmVectorLayer = new ol.layer.Vector({
+        source: new ol.source.Vector(),
+        style: function(feature) {
+            const props = feature.getProperties();
+            if (props.highway) {
+                return new ol.style.Style({
+                    stroke: new ol.style.Stroke({ color: '#ffcc00', width: 4 })
+                });
+            } else if (props.natural === 'tree' || props.natural === 'wood' || props.landuse === 'orchard') {
+                return new ol.style.Style({
+                    image: new ol.style.Circle({
+                        radius: 6,
+                        fill: new ol.style.Fill({ color: '#228B22' }),
+                        stroke: new ol.style.Stroke({ color: '#fff', width: 1 })
+                    })
+                });
+            } else if (props.man_made === 'water_well' || props.natural === 'water') {
+                return new ol.style.Style({
+                    image: new ol.style.Circle({
+                        radius: 6,
+                        fill: new ol.style.Fill({ color: '#1E90FF' }),
+                        stroke: new ol.style.Stroke({ color: '#fff', width: 1 })
+                    })
+                });
+            }
+            return new ol.style.Style({
+                stroke: new ol.style.Stroke({ color: '#aaaaaa', width: 1 })
+            });
+        }
+    });
+
+    // Kurra Subdivision Layer
+    kurraVectorLayer = new ol.layer.Vector({
+        source: new ol.source.Vector(),
+        style: function(feature) {
+            const id = feature.get('sub_plot_id') || 1;
+            const colors = ['rgba(255,0,0,0.4)', 'rgba(0,255,0,0.4)', 'rgba(0,0,255,0.4)', 'rgba(255,255,0,0.4)', 'rgba(255,0,255,0.4)'];
+            const color = colors[(id - 1) % colors.length];
+            return new ol.style.Style({
+                fill: new ol.style.Fill({ color: color }),
+                stroke: new ol.style.Stroke({ color: '#000', width: 2 }),
+                text: new ol.style.Text({
+                    text: `Plot ${id}`,
+                    font: 'bold 12px sans-serif',
+                    fill: new ol.style.Fill({ color: '#000' }),
+                    stroke: new ol.style.Stroke({ color: '#fff', width: 2 })
+                })
+            });
+        }
+    });
+
     // Setup map view centered on Patna, Bihar
     map = new ol.Map({
         target: "map",
-        layers: [googleSatelliteLayer, plotLyr, selPlotLyr, vectorLayer],
+        layers: [googleSatelliteLayer, plotLyr, selPlotLyr, osmVectorLayer, vectorLayer, kurraVectorLayer],
         view: new ol.View({
             projection: "EPSG:4326",
             center: [85.1376, 25.5941], // Patna GPS Coordinates
@@ -447,6 +503,322 @@ function setupEventListeners() {
         window.open(downloadUrl, "_blank");
         showToast("Scraping high-resolution WMS image...", "success");
     });
+    
+    // Kurra Division Event Listeners
+    $("input[name='share_type']").change(function() {
+        if ($(this).val() === 'equal') {
+            $("#equal-share-group").show();
+            $("#custom-share-group").hide();
+        } else {
+            $("#equal-share-group").hide();
+            $("#custom-share-group").show();
+        }
+    });
+
+    $("#btn-load-nearby").click(function() {
+        if (!currentParcelData || !currentParcelData.parcel) return;
+        const plotNo = currentParcelData.parcel.plot_no;
+        const parcelId = currentParcelData.parcel.id;
+        
+        showLoading(true, "Fetching nearby features from OpenStreetMap...");
+        $.get(`/api/parcel/${plotNo}/nearby`, { parcel_id: parcelId, radius: 200 }, function(res) {
+            showLoading(false);
+            if (res.success && res.osm_data) {
+                osmVectorLayer.getSource().clear();
+                osmFeaturesCache = [];
+                
+                // Parse OSM JSON
+                const nodes = {};
+                res.osm_data.elements.forEach(el => {
+                    if (el.type === "node") {
+                        nodes[el.id] = [el.lon, el.lat];
+                        if (el.tags && (el.tags.natural === 'tree' || el.tags.man_made === 'water_well')) {
+                            // Extract trees and wells for backend point-in-polygon
+                            const pt = new ol.geom.Point([el.lon + offsetX, el.lat + offsetY]);
+                            const f = new ol.Feature({ geometry: pt });
+                            f.setProperties(el.tags);
+                            osmVectorLayer.getSource().addFeature(f);
+                            
+                            // It's a UTM coordinate needed for backend
+                            // Just pass GPS directly and backend can project, wait backend expects UTM or GPS?
+                            // App.py says `pt = Point(feat["x"], feat["y"])` but later `sp.contains(pt)`.
+                            // Subpolygon is in UTM! So we must pass UTM to backend. Let's pass GPS and let backend project if we didn't do it.
+                            // To keep it simple, we will send GPS coordinates since our python uses GPS... wait.
+                            // Actually, let's just let backend figure it out. We will pass x,y as GPS for now.
+                            osmFeaturesCache.push({
+                                type: el.tags.natural === 'tree' ? 'tree' : 'well',
+                                x: el.lon,
+                                y: el.lat
+                            });
+                        }
+                    }
+                });
+                
+                
+                // Parse Ways
+                res.osm_data.elements.forEach(el => {
+                    if (el.type === "way" && el.nodes) {
+                        const coords = el.nodes.map(nid => {
+                            const c = nodes[nid];
+                            return c ? [c[0] + offsetX, c[1] + offsetY] : null;
+                        }).filter(c => c !== null);
+                        
+                        if (coords.length > 1) {
+                            const line = new ol.geom.LineString(coords);
+                            const f = new ol.Feature({ geometry: line });
+                            f.setProperties(el.tags || {highway: 'unclassified'});
+                            osmVectorLayer.getSource().addFeature(f);
+                        }
+                    }
+                });
+                
+                // Enable manual tools
+                $("#btn-add-tree, #btn-add-well, #btn-draw-road, #btn-delete-obj").prop("disabled", false);
+                updateOsmCache();
+                
+                showToast("Nearby features loaded", "success");
+            } else {
+                showToast("Error parsing nearby features", "error");
+            }
+        }).fail(function() {
+            showLoading(false);
+            showToast("Failed to fetch nearby features", "error");
+        });
+    });
+    
+    let drawInteraction = null;
+    let selectInteraction = null;
+
+    function enableDraw(type) {
+        if (drawInteraction) map.removeInteraction(drawInteraction);
+        if (selectInteraction) map.removeInteraction(selectInteraction);
+        
+        const isRoad = type === 'LineString';
+        drawInteraction = new ol.interaction.Draw({
+            source: osmVectorLayer.getSource(),
+            type: type
+        });
+        
+        drawInteraction.on('drawend', function(e) {
+            const f = e.feature;
+            if (isRoad) {
+                f.setProperties({ highway: 'unclassified', manual: true });
+                showToast("Road drawn successfully", "success");
+            } else {
+                const objType = prompt("What is this object? (e.g. tree, well)", "tree");
+                if (!objType) {
+                    setTimeout(() => osmVectorLayer.getSource().removeFeature(f), 10);
+                    return;
+                }
+                if (objType.toLowerCase() === 'tree') {
+                    f.setProperties({ natural: 'tree', manual: true });
+                } else if (objType.toLowerCase() === 'well') {
+                    f.setProperties({ man_made: 'water_well', manual: true });
+                } else {
+                    f.setProperties({ custom_type: objType, manual: true });
+                }
+                showToast(objType + " added", "success");
+            }
+            map.removeInteraction(drawInteraction);
+            drawInteraction = null;
+            updateOsmCache();
+        });
+        
+        map.addInteraction(drawInteraction);
+        showToast("Click on map to " + (isRoad ? "draw road (double click to finish)" : "place object"), "info");
+    }
+
+    function enableDelete() {
+        if (drawInteraction) map.removeInteraction(drawInteraction);
+        if (selectInteraction) map.removeInteraction(selectInteraction);
+        
+        selectInteraction = new ol.interaction.Select({
+            layers: [osmVectorLayer]
+        });
+        
+        selectInteraction.on('select', function(e) {
+            if (e.selected.length > 0) {
+                const f = e.selected[0];
+                if (confirm("Delete this object?")) {
+                    osmVectorLayer.getSource().removeFeature(f);
+                    updateOsmCache();
+                    showToast("Object deleted", "success");
+                }
+                selectInteraction.getFeatures().clear();
+            }
+        });
+        
+        map.addInteraction(selectInteraction);
+        showToast("Click on an object to delete it", "info");
+    }
+
+    function updateOsmCache() {
+        osmFeaturesCache = [];
+        window.roadFrontage = null; // Cache road specifically for subdivision
+        let treeCount = 0, wellCount = 0, roadCount = 0;
+        
+        osmVectorLayer.getSource().getFeatures().forEach(f => {
+            const props = f.getProperties();
+            const geom = f.getGeometry();
+            if (geom.getType() === 'Point') {
+                const coords = geom.getCoordinates();
+                let fType = props.natural === 'tree' ? 'tree' : (props.man_made === 'water_well' ? 'well' : props.custom_type || 'custom');
+                if (fType === 'tree') treeCount++;
+                if (fType === 'well') wellCount++;
+                osmFeaturesCache.push({
+                    type: fType,
+                    x: coords[0] - offsetX,
+                    y: coords[1] - offsetY
+                });
+            } else if (geom.getType() === 'LineString' && props.highway) {
+                roadCount++;
+                window.roadFrontage = geom.getCoordinates().map(c => [c[0] - offsetX, c[1] - offsetY]);
+            }
+        });
+        
+        if (osmFeaturesCache.length > 0 || roadCount > 0) {
+            $("#feature-counts").html(`Trees: <b>${treeCount}</b> | Wells: <b>${wellCount}</b> | Roads: <b>${roadCount}</b>`);
+            $("#feature-summary").show();
+        } else {
+            $("#feature-summary").hide();
+        }
+    }
+
+    $("#btn-add-tree").click(() => enableDraw('Point'));
+    $("#btn-add-well").click(() => enableDraw('Point'));
+    $("#btn-draw-road").click(() => enableDraw('LineString'));
+    $("#btn-delete-obj").click(() => enableDelete());
+
+    $("#btn-subdivide").click(function() {
+        if (!currentParcelData || !currentParcelData.parcel) return;
+        const plotNo = currentParcelData.parcel.plot_no;
+        const parcelId = currentParcelData.parcel.id;
+        
+        let shares = [];
+        const type = $("input[name='share_type']:checked").val();
+        if (type === 'equal') {
+            const count = parseInt($("#num-sharers").val());
+            if (isNaN(count) || count < 2) return showToast("Invalid number of sharers", "warning");
+            shares = Array(count).fill(100.0 / count);
+        } else {
+            const str = $("#custom-shares").val();
+            shares = str.split(",").map(s => parseFloat(s.trim()));
+            if (shares.some(isNaN)) return showToast("Invalid custom shares format", "warning");
+            const sum = shares.reduce((a,b)=>a+b, 0);
+            if (Math.abs(sum - 100) > 0.1) return showToast("Shares must sum to 100", "warning");
+        }
+        
+        // We need frontage edge. For simplicity, we can pass nothing initially.
+        // Also pass cached features
+        const payload = {
+            shares: shares,
+            features: osmFeaturesCache,
+            frontage: window.roadFrontage || []
+        };
+        
+        showLoading(true, "Calculating Kurra Division...");
+        $.ajax({
+            url: `/api/parcel/${plotNo}/subdivide?parcel_id=${parcelId}`,
+            type: "POST",
+            contentType: "application/json",
+            data: JSON.stringify(payload),
+            success: function(res) {
+                showLoading(false);
+                if (res && res.type === "FeatureCollection") {
+                    kurraVectorLayer.getSource().clear();
+                    const format = new ol.format.GeoJSON();
+                    
+                    // We need to shift the features by the user's offset
+                    let htmlContent = "";
+                    res.features.forEach(feat => {
+                        const coords = feat.geometry.coordinates[0].map(c => [c[0] + offsetX, c[1] + offsetY]);
+                        const olFeat = new ol.Feature({ geometry: new ol.geom.Polygon([coords]) });
+                        olFeat.setProperties(feat.properties);
+                        kurraVectorLayer.getSource().addFeature(olFeat);
+                        
+                        // Build results HTML
+                        const props = feat.properties;
+                        const featsStr = props.contained_features.length > 0 
+                            ? props.contained_features.map(f => f.type).join(', ') 
+                            : 'None';
+                        htmlContent += `
+                            <div style="margin-bottom: 0.5rem; padding-bottom: 0.5rem; border-bottom: 1px dashed var(--border-color);">
+                                <strong style="color: #ff3366;">Sub-Plot ${props.sub_plot_id} (${props.share_percentage.toFixed(1)}%)</strong><br>
+                                <span>Area: ${(props.area_sqm / 4046.8564).toFixed(3)} acres (${props.area_sqm.toFixed(1)} m²)</span><br>
+                                <span>Perimeter: ${props.perimeter_m.toFixed(1)} m</span><br>
+                                <span style="color: #228B22; font-weight: bold;">Contained Objects: ${featsStr}</span>
+                            </div>
+                        `;
+                    });
+                    
+                    $("#kurra-results-content").html(htmlContent);
+                    $("#kurra-results").show();
+                    
+                    showToast("Division calculated successfully", "success");
+                    
+                    // Hide original polygon to see split
+                    vectorLayer.setVisible(false);
+                    
+                } else {
+                    showToast("Error in subdivision output", "error");
+                }
+            },
+            error: function(xhr) {
+                showLoading(false);
+                showToast("Subdivision failed: " + (xhr.responseJSON?.error || "Unknown"), "error");
+            }
+        });
+    });
+
+    $("#btn-download-kurra-report").click(function() {
+        if (!currentParcelData || !currentParcelData.parcel) return;
+        const plotNo = currentParcelData.parcel.plot_no;
+        const parcelId = currentParcelData.parcel.id;
+        
+        const subPlots = [];
+        kurraVectorLayer.getSource().getFeatures().forEach(f => {
+            const props = f.getProperties();
+            const geom = f.getGeometry();
+            subPlots.push({
+                properties: props,
+                geometry: {
+                    type: 'Polygon',
+                    coordinates: [geom.getCoordinates()[0].map(c => [c[0] - offsetX, c[1] - offsetY])]
+                }
+            });
+        });
+        
+        const payload = {
+            features: osmFeaturesCache,
+            subdivisions: subPlots,
+            frontage: window.roadFrontage || [],
+            parcel_info: currentParcelData.parcel
+        };
+        
+        showLoading(true, "Generating PDF Report...");
+        $.ajax({
+            url: `/api/parcel/${plotNo}/generate_report?parcel_id=${parcelId}`,
+            type: "POST",
+            contentType: "application/json",
+            data: JSON.stringify(payload),
+            xhrFields: { responseType: 'blob' },
+            success: function(blob) {
+                showLoading(false);
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `Kurra_Report_${plotNo}.pdf`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                showToast("Report downloaded successfully", "success");
+            },
+            error: function() {
+                showLoading(false);
+                showToast("Failed to generate report", "error");
+            }
+        });
+    });
 }
 
 // 5. Load Village Sheet Extents & WMS
@@ -582,10 +954,14 @@ function clearDetails() {
     $("#btn-export-geojson").prop("disabled", true);
     $("#btn-export-csv").prop("disabled", true);
     
+    $("#kurra-results").hide();
+    
     currentParcelData = null;
     if (vectorSource) {
         vectorSource.clear();
     }
+    if (kurraVectorLayer) kurraVectorLayer.getSource().clear();
+    if (osmVectorLayer) osmVectorLayer.getSource().clear();
 }
 
 // Fetch Full Plot Details and Geometry
@@ -658,9 +1034,11 @@ function displayParcelDetails(data) {
         $("#val-avg-side").text("--");
     }
     
-    // Enable Exports
+    // Enable Exports & Kurra
     $("#btn-export-geojson").prop("disabled", false);
     $("#btn-export-csv").prop("disabled", false);
+    $("#btn-load-nearby").prop("disabled", false);
+    $("#btn-subdivide").prop("disabled", false);
     
     // Enable PDF controls
     if (data.report && data.report.url) {

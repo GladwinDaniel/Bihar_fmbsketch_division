@@ -7,7 +7,10 @@ import urllib3
 import shapely.wkt
 from bs4 import BeautifulSoup
 from flask import Flask, render_template, request, Response, jsonify
+from shapely.geometry import Polygon, Point
 from models import db, Parcel, ParcelVertex, BoundarySegment, LdmReport
+import subdivide
+import cv_detector
 
 # Disable insecure request warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -842,6 +845,205 @@ def export_csv(plot_no):
         mimetype="text/csv",
         headers={"Content-Disposition": f"attachment; filename=plot_{plot_no}_boundary.csv"}
     )
+
+@app.route("/api/parcel/<plot_no>/nearby", methods=["GET"])
+def get_nearby_features(plot_no):
+    parcel_id = request.args.get("parcel_id")
+    radius = float(request.args.get("radius", 200)) # Default 200m buffer
+    
+    if parcel_id and parcel_id not in ("null", "undefined", ""):
+        parcel = Parcel.query.get(parcel_id)
+    else:
+        parcel = Parcel.query.filter_by(plot_no=plot_no).order_by(Parcel.id.desc()).first()
+        
+    if not parcel:
+        return jsonify({"error": "Parcel not found"}), 404
+
+    # Get bounding box of the parcel
+    vertices = parcel.vertices
+    if not vertices:
+         return jsonify({"error": "Parcel has no geometric data"}), 400
+         
+    lats = [v.lat for v in vertices]
+    lons = [v.lon for v in vertices]
+    
+    min_lat, max_lat = min(lats), max(lats)
+    min_lon, max_lon = min(lons), max(lons)
+    
+    # Calculate buffer in degrees (approximate) for 500m road detection
+    radius_m = 500.0
+    lat_buffer = radius_m / 111000.0
+    lon_buffer = radius_m / (111000.0 * math.cos(math.radians((min_lat + max_lat) / 2)))
+    
+    bbox_south = min_lat - lat_buffer
+    bbox_north = max_lat + lat_buffer
+    bbox_west = min_lon - lon_buffer
+    bbox_east = max_lon + lon_buffer
+    
+    # Compute CV detection bounding box format: south,west,north,east
+    bbox_str = f"{bbox_south},{bbox_west},{bbox_north},{bbox_east}"
+    
+    try:
+        osm_data = cv_detector.detect_features(bbox_str)
+        
+        # Filter trees and wells to ONLY be inside the parcel
+        import pyproj
+        from shapely.geometry import Polygon, Point
+        transformer_inv = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32645", always_xy=True)
+        
+        poly_coords = [(v.x, v.y) for v in sorted(vertices, key=lambda v: v.sequence_order)]
+        parcel_poly = Polygon(poly_coords)
+        if not parcel_poly.is_valid:
+            parcel_poly = parcel_poly.buffer(0)
+            
+        filtered_elements = []
+        for el in osm_data.get("elements", []):
+            if el["type"] == "node" and "tags" in el and ("natural" in el["tags"] or "man_made" in el["tags"]):
+                x_utm, y_utm = transformer_inv.transform(el["lon"], el["lat"])
+                if parcel_poly.contains(Point(x_utm, y_utm)):
+                    filtered_elements.append(el)
+            else:
+                filtered_elements.append(el)
+        osm_data["elements"] = filtered_elements
+        
+        return jsonify({"success": True, "osm_data": osm_data})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/parcel/<plot_no>/subdivide", methods=["POST"])
+def subdivide_parcel(plot_no):
+    data = request.json
+    if not data:
+        return jsonify({"error": "Missing JSON body"}), 400
+        
+    shares = data.get("shares")
+    if not shares or not isinstance(shares, list):
+         return jsonify({"error": "Missing or invalid 'shares' list"}), 400
+         
+    frontage = data.get("frontage", []) # List of [x_utm, y_utm] for the road edge
+    trees_and_wells = data.get("features", []) # List of dicts: {"type": "tree", "x": ..., "y": ...}
+    
+    parcel_id = request.args.get("parcel_id")
+    if parcel_id and parcel_id not in ("null", "undefined", ""):
+        parcel = Parcel.query.get(parcel_id)
+    else:
+        parcel = Parcel.query.filter_by(plot_no=plot_no).order_by(Parcel.id.desc()).first()
+        
+    if not parcel:
+        return jsonify({"error": "Parcel not found"}), 404
+        
+    vertices = sorted(parcel.vertices, key=lambda v: v.sequence_order)
+    if not vertices:
+         return jsonify({"error": "Parcel has no geometric data"}), 400
+         
+    # Build shapely polygon using UTM coordinates for accurate area calculations in meters
+    poly_coords = [(v.x, v.y) for v in vertices]
+    if poly_coords[0] != poly_coords[-1]:
+        poly_coords.append(poly_coords[0])
+    
+    poly = Polygon(poly_coords)
+    if not poly.is_valid:
+         poly = poly.buffer(0)
+         
+    # Function to map UTM back to GPS
+    import pyproj
+    try:
+        transformer = pyproj.Transformer.from_crs("EPSG:32645", "EPSG:4326", always_xy=True)
+        transformer_inv = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32645", always_xy=True)
+        def utm_to_gps(x, y):
+             return transformer.transform(x, y)
+        def gps_to_utm(lon, lat):
+             return transformer_inv.transform(lon, lat)
+    except Exception:
+         # Fallback approximation (very rough)
+         return jsonify({"error": "Coordinate transformation failed"}), 500
+         
+    frontage_utm = [gps_to_utm(lon, lat) for lon, lat in frontage] if frontage else []
+         
+    # Run the subdivision algorithm
+    try:
+         sub_polys = subdivide.split_parcel(poly, shares, frontage_utm)
+    except Exception as e:
+         return jsonify({"error": f"Subdivision failed: {str(e)}"}), 500
+         
+    results = []
+    
+    # Process each sub-polygon
+    for i, sp in enumerate(sub_polys):
+        sp_coords = list(sp.exterior.coords)
+        gps_coords = [utm_to_gps(x, y) for x, y in sp_coords]
+        
+        # Check which features fall in this polygon
+        contained_features = []
+        for feat in trees_and_wells:
+            fx_utm, fy_utm = gps_to_utm(feat["x"], feat["y"])
+            pt = Point(fx_utm, fy_utm)
+            if sp.contains(pt):
+                contained_features.append(feat)
+                
+        # Perimeter of the front edge (if provided)
+        frontage_length = 0
+        if frontage_utm:
+             # Basic check if the subpolygon touches the frontage line
+             front_line = shapely.geometry.LineString(frontage_utm)
+             intersection = sp.intersection(front_line)
+             frontage_length = intersection.length
+             
+        results.append({
+             "type": "Feature",
+             "properties": {
+                 "sub_plot_id": i + 1,
+                 "share_percentage": shares[i],
+                 "area_sqm": sp.area,
+                 "perimeter_m": sp.length,
+                 "frontage_m": frontage_length,
+                 "contained_features": contained_features
+             },
+             "geometry": {
+                 "type": "Polygon",
+                 "coordinates": [gps_coords]
+             }
+        })
+        
+    return jsonify({
+        "type": "FeatureCollection",
+        "features": results
+    })
+
+@app.route("/api/parcel/<plot_no>/generate_report", methods=["POST"])
+def generate_report(plot_no):
+    data = request.json
+    parcel_id = request.args.get("parcel_id")
+    
+    parcel = Parcel.query.get(parcel_id)
+    if not parcel:
+        return jsonify({"error": "Parcel not found"}), 404
+        
+    parcel_vertices = [[v.lon, v.lat] for v in sorted(parcel.vertices, key=lambda x: x.sequence_order)]
+    
+    features = data.get("features", [])
+    subdivisions = data.get("subdivisions", [])
+    frontage = data.get("frontage", [])
+    parcel_info = data.get("parcel_info", {})
+    
+    import report_generator
+    import io
+    from flask import send_file
+    
+    try:
+        pdf_bytes = report_generator.generate_kurra_report(plot_no, parcel_vertices, features, subdivisions, frontage, parcel_info)
+        return send_file(
+            io.BytesIO(bytes(pdf_bytes)),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"Kurra_Report_{plot_no}.pdf"
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5001, debug=True, use_reloader=False)

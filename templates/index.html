@@ -243,6 +243,63 @@
                 </div>
             </div>
 
+            <!-- Kurra Division Panel -->
+            <div class="form-section" id="kurra-section">
+                <h3 class="section-title"><i class="fa fa-pie-chart"></i> Kurra (Land Division)</h3>
+                <div class="panel-card" style="gap: 0.75rem;">
+                    <div style="display: flex; gap: 0.5rem; width: 100%;">
+                        <button class="btn-secondary" id="btn-load-nearby" style="flex: 1; padding: 0.5rem; font-size: 0.85rem;" disabled>
+                            <i class="fa fa-map-signs"></i> Auto Detect (CV)
+                        </button>
+                    </div>
+                    
+                    <div class="form-group" style="margin-top: 0.5rem;">
+                        <label class="form-label">Manual Map Overrides</label>
+                        <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
+                            <button class="btn-secondary" id="btn-add-tree" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;" disabled><i class="fa fa-tree"></i> Add Tree</button>
+                            <button class="btn-secondary" id="btn-add-well" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;" disabled><i class="fa fa-tint"></i> Add Well</button>
+                            <button class="btn-secondary" id="btn-draw-road" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;" disabled><i class="fa fa-road"></i> Draw Road</button>
+                            <button class="btn-secondary" id="btn-delete-obj" style="font-size: 0.75rem; padding: 0.25rem 0.5rem; color: #ff6b6b;" disabled><i class="fa fa-trash"></i> Delete Obj</button>
+                        </div>
+                    </div>
+                    
+                    <div id="feature-summary" style="margin-top: 0.5rem; padding: 0.5rem; background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 4px; font-size: 0.85rem; display: none;">
+                        <strong>Detected Objects:</strong>
+                        <div id="feature-counts" style="margin-top: 0.25rem;"></div>
+                    </div>
+                    
+                    <div class="form-group" style="margin-top: 0.5rem;">
+                        <label class="form-label">Division Type</label>
+                        <div style="display: flex; gap: 1rem; align-items: center; color: var(--text-primary); font-size: 0.85rem;">
+                            <label><input type="radio" name="share_type" value="equal" checked> Equal Share</label>
+                            <label><input type="radio" name="share_type" value="custom"> Custom Share (%)</label>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group" id="equal-share-group">
+                        <label class="form-label" for="num-sharers">Number of Co-Sharers</label>
+                        <input type="number" id="num-sharers" min="2" max="10" value="2" style="width: 100%; padding: 0.5rem; background: var(--panel-bg); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
+                    </div>
+                    
+                    <div class="form-group" id="custom-share-group" style="display: none;">
+                        <label class="form-label">Enter Percentages (Comma separated, e.g. 70,30)</label>
+                        <input type="text" id="custom-shares" placeholder="e.g. 50,25,25" style="width: 100%; padding: 0.5rem; background: var(--panel-bg); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
+                    </div>
+                    
+                    <button class="btn-primary" id="btn-subdivide" style="width: 100%; padding: 0.5rem; margin-top: 0.5rem;" disabled>
+                        <i class="fa fa-cogs"></i> Generate Kurra Division
+                    </button>
+                    
+                    <div id="kurra-results" style="display: none; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color); font-size: 0.85rem; color: var(--text-primary);">
+                        <h4 style="margin: 0 0 0.5rem 0;">Division Summary</h4>
+                        <div id="kurra-results-content" style="max-height: 200px; overflow-y: auto;"></div>
+                        <button class="btn-secondary" id="btn-download-kurra-report" style="width: 100%; padding: 0.5rem; margin-top: 0.5rem;">
+                            <i class="fa fa-file-pdf-o"></i> Download Segregation Report
+                        </button>
+                    </div>
+                </div>
+            </div>
+
             <!-- Documents & Exports Panel -->
             <div class="form-section">
                 <h3 class="section-title"><i class="fa fa-file-pdf-o"></i> Documents & Exports</h3>
