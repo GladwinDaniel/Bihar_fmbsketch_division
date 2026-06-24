@@ -255,11 +255,15 @@ def get_plot_at_gps():
             
             # Check for standard valid coordinate box sizes to avoid divide by zero
             if abs(g_xmax - g_xmin) > 1e-6 and abs(g_ymax - g_ymin) > 1e-6:
-                pct_x = (lon - g_xmin) / (g_xmax - g_xmin)
-                pct_y = (lat - g_ymin) / (g_ymax - g_ymin)
-                
-                x_utm = u_xmin + pct_x * (u_xmax - u_xmin)
-                y_utm = u_ymin + pct_y * (u_ymax - u_ymin)
+                try:
+                    import pyproj
+                    transformer = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32645", always_xy=True)
+                    x_utm, y_utm = transformer.transform(lon, lat)
+                except Exception:
+                    pct_x = (lon - g_xmin) / (g_xmax - g_xmin)
+                    pct_y = (lat - g_ymin) / (g_ymax - g_ymin)
+                    x_utm = u_xmin + pct_x * (u_xmax - u_xmin)
+                    y_utm = u_ymin + pct_y * (u_ymax - u_ymin)
                 
                 # 3. Call getPlotAtXY with native UTM coordinates
                 url_plot = f"{BHUNAKSHA_URL}/rest/MapInfo/getPlotAtXY"
@@ -362,34 +366,29 @@ def get_plot_details_and_inspection():
                 rel_path = report_url.lstrip("/")
                 if not os.path.exists(rel_path):
                     try:
-                        url_geom = f"{BHUNAKSHA_URL}/rest/MapInfo/getPlotInfo"
-                        geom_headers = get_proxy_headers(content_type="application/x-www-form-urlencoded; charset=UTF-8")
-                        r_geom = session.post(url_geom, data={
-                            "state": state, "giscode": giscode, "plotno": plot_no
-                        }, headers=geom_headers, timeout=8)
-                        if r_geom and r_geom.status_code == 200:
-                            data_geom = r_geom.json()
-                            info_links = data_geom.get("infoLinks")
-                            if info_links:
-                                soup_links = BeautifulSoup(info_links, "html.parser")
-                                a_tag = soup_links.find("a")
-                                if a_tag and a_tag.get("href"):
-                                    href = a_tag.get("href")
-                                    if href.startswith("../"):
-                                        remote_pdf_url = "/" + href[3:]
-                                    elif href.startswith("/"):
-                                        remote_pdf_url = href
-                                    else:
-                                        remote_pdf_url = "/10/" + href
-                                    full_pdf_url = f"{BHUNAKSHA_URL}{remote_pdf_url}"
-                                    pdf_r = session.get(full_pdf_url, headers={
-                                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                                        "Referer": f"{BHUNAKSHA_URL}/10/indexmain.jsp"
-                                    }, timeout=8)
-                                    if pdf_r and pdf_r.status_code == 200:
+                        import base64
+                        pdf_api_url = f"{BHUNAKSHA_URL}/rest/Reports/PlotReportPDF"
+                        pdf_payload = {
+                            "state": state,
+                            "giscode": giscode,
+                            "plotno": plot_no,
+                            "sameownerplotreport": "false",
+                            "derivedlayerids": "-1",
+                            "selectedlayerids": "-1",
+                            "scaletextfield": "0"
+                        }
+                        pdf_r = meta_post(pdf_api_url, data=pdf_payload)
+                        if pdf_r and pdf_r.status_code == 200 and pdf_r.text:
+                            text_data = pdf_r.text.strip()
+                            if not text_data.startswith("<") and len(text_data) > 1000:
+                                try:
+                                    pdf_bytes = base64.b64decode(text_data)
+                                    if pdf_bytes.startswith(b"%PDF"):
                                         os.makedirs("static/reports", exist_ok=True)
                                         with open(rel_path, "wb") as f_pdf:
-                                            f_pdf.write(pdf_r.content)
+                                            f_pdf.write(pdf_bytes)
+                                except Exception as b64_err:
+                                    print("Base64 decode error for fallback PDF:", b64_err)
                     except Exception as redownload_err:
                         print("Failed to redownload missing PDF:", redownload_err)
             
@@ -550,7 +549,14 @@ def get_plot_details_and_inspection():
                 poly = shapely.wkt.loads(geom_wkt)
                 area_sqm = poly.area
                 perimeter_m = poly.length
-                raw_coords = list(poly.exterior.coords)
+                
+                if poly.geom_type == 'MultiPolygon':
+                    largest_poly = max(poly.geoms, key=lambda a: a.area)
+                    raw_coords = list(largest_poly.exterior.coords)
+                elif poly.geom_type == 'Polygon':
+                    raw_coords = list(poly.exterior.coords)
+                else:
+                    raw_coords = []
                 
                 # Load GPS and UTM extents for coordinate conversion
                 gps_extent = utm_extent = None
@@ -589,12 +595,18 @@ def get_plot_details_and_inspection():
                     u_xmin, u_xmax = utm_extent["xmin"], utm_extent["xmax"]
                     u_ymin, u_ymax = utm_extent["ymin"], utm_extent["ymax"]
                     
-                    def map_utm_to_gps(x, y):
-                        pct_x = (x - u_xmin) / (u_xmax - u_xmin) if (u_xmax - u_xmin) > 0 else 0.5
-                        pct_y = (y - u_ymin) / (u_ymax - u_ymin) if (u_ymax - u_ymin) > 0 else 0.5
-                        lon = g_xmin + pct_x * (g_xmax - g_xmin)
-                        lat = g_ymin + pct_y * (g_ymax - g_ymin)
-                        return lon, lat
+                    try:
+                        import pyproj
+                        transformer = pyproj.Transformer.from_crs("EPSG:32645", "EPSG:4326", always_xy=True)
+                        def map_utm_to_gps(x, y):
+                            return transformer.transform(x, y)
+                    except Exception:
+                        def map_utm_to_gps(x, y):
+                            pct_x = (x - u_xmin) / (u_xmax - u_xmin) if (u_xmax - u_xmin) > 0 else 0.5
+                            pct_y = (y - u_ymin) / (u_ymax - u_ymin) if (u_ymax - u_ymin) > 0 else 0.5
+                            lon = g_xmin + pct_x * (g_xmax - g_xmin)
+                            lat = g_ymin + pct_y * (g_ymax - g_ymin)
+                            return lon, lat
                     
                     for i, (x_utm, y_utm) in enumerate(raw_coords):
                         lon_gps, lat_gps = map_utm_to_gps(x_utm, y_utm)
@@ -615,31 +627,36 @@ def get_plot_details_and_inspection():
                         })
                 
                 # Also try to get PDF report
+                # Also try to get PDF report via the REST API
                 try:
-                    info_links = data_geom.get("infoLinks")
-                    if info_links:
-                        soup_links = BeautifulSoup(info_links, "html.parser")
-                        a_tag = soup_links.find("a")
-                        if a_tag and a_tag.get("href"):
-                            href = a_tag.get("href")
-                            if href.startswith("../"):
-                                remote_pdf_url = "/" + href[3:]
-                            elif href.startswith("/"):
-                                remote_pdf_url = href
-                            else:
-                                remote_pdf_url = "/10/" + href
-                            full_pdf_url = f"{BHUNAKSHA_URL}{remote_pdf_url}"
-                            pdf_r = meta_get(full_pdf_url, headers={
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                                "Referer": f"{BHUNAKSHA_URL}/10/indexmain.jsp"
-                            })
-                            if pdf_r and pdf_r.status_code == 200:
-                                os.makedirs("static/reports", exist_ok=True)
-                                filename = f"{giscode}_{plot_no}.pdf"
-                                filepath = os.path.join("static", "reports", filename)
-                                with open(filepath, "wb") as f_pdf:
-                                    f_pdf.write(pdf_r.content)
-                                local_report_url = f"/static/reports/{filename}"
+                    import base64
+                    pdf_api_url = f"{BHUNAKSHA_URL}/rest/Reports/PlotReportPDF"
+                    pdf_payload = {
+                        "state": state,
+                        "giscode": giscode,
+                        "plotno": plot_no,
+                        "sameownerplotreport": "false",
+                        "derivedlayerids": "-1",
+                        "selectedlayerids": "-1",
+                        "scaletextfield": "0"
+                    }
+                    pdf_r = meta_post(pdf_api_url, data=pdf_payload)
+                    
+                    if pdf_r and pdf_r.status_code == 200 and pdf_r.text:
+                        text_data = pdf_r.text.strip()
+                        # Check that the response is not HTML and is long enough
+                        if not text_data.startswith("<") and len(text_data) > 1000:
+                            try:
+                                pdf_bytes = base64.b64decode(text_data)
+                                if pdf_bytes.startswith(b"%PDF"):
+                                    os.makedirs("static/reports", exist_ok=True)
+                                    filename = f"{giscode}_{plot_no}.pdf"
+                                    filepath = os.path.join("static", "reports", filename)
+                                    with open(filepath, "wb") as f_pdf:
+                                        f_pdf.write(pdf_bytes)
+                                    local_report_url = f"/static/reports/{filename}"
+                            except Exception as b64_err:
+                                print("Base64 decode error for PDF:", b64_err)
                 except Exception as report_err:
                     print("PDF download error:", report_err)
                     
