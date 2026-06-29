@@ -258,8 +258,10 @@
                         <div style="display: flex; gap: 0.25rem; flex-wrap: wrap;">
                             <button class="btn-secondary" id="btn-add-tree" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;" disabled><i class="fa fa-tree"></i> Add Tree</button>
                             <button class="btn-secondary" id="btn-add-well" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;" disabled><i class="fa fa-tint"></i> Add Well</button>
-                            <button class="btn-secondary" id="btn-draw-road" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;" disabled><i class="fa fa-road"></i> Draw Road</button>
                             <button class="btn-secondary" id="btn-delete-obj" style="font-size: 0.75rem; padding: 0.25rem 0.5rem; color: #ff6b6b;" disabled><i class="fa fa-trash"></i> Delete Obj</button>
+                        </div>
+                        <div id="nearby-info" style="margin-top: 0.5rem; font-size: 0.75rem; color: #a0aec0;">
+                            <i class="fa fa-info-circle"></i> Nearby Infrastructure: Select a plot...
                         </div>
                     </div>
                     
@@ -285,6 +287,8 @@
                         <label class="form-label">Enter Percentages (Comma separated, e.g. 70,30)</label>
                         <input type="text" id="custom-shares" placeholder="e.g. 50,25,25" style="width: 100%; padding: 0.5rem; background: var(--panel-bg); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
                     </div>
+                    
+
                     
                     <button class="btn-primary" id="btn-subdivide" style="width: 100%; padding: 0.5rem; margin-top: 0.5rem;" disabled>
                         <i class="fa fa-cogs"></i> Generate Kurra Division

@@ -178,3 +178,97 @@ def split_parcel(poly, shares, frontage_coords=None):
     result_polys.append(current_poly)
     
     return result_polys
+
+def generate_strategies(poly, shares, frontage_coords=None, river_frontage_coords=None):
+    """
+    Generates multiple splitting strategies.
+    Returns a list of dicts: {"name": str, "polys": list of Polygons, "angle_deg": float}
+    """
+    if not isinstance(poly, Polygon):
+        raise ValueError("poly must be a shapely Polygon")
+        
+    strategies = []
+    
+    # Base split logic using different angles
+    total_shares = sum(shares)
+    normalized_shares = [s / total_shares for s in shares]
+    
+    rect = poly.minimum_rotated_rectangle
+    coords = list(rect.exterior.coords)
+    d1 = math.hypot(coords[1][0] - coords[0][0], coords[1][1] - coords[0][1])
+    d2 = math.hypot(coords[2][0] - coords[1][0], coords[2][1] - coords[1][1])
+    
+    longest_axis_angle = get_angle(coords[0], coords[1]) if d1 > d2 else get_angle(coords[1], coords[2])
+    shortest_axis_angle = get_angle(coords[1], coords[2]) if d1 > d2 else get_angle(coords[0], coords[1])
+    
+    # Strategy 1: Parallel to shortest side (Compact Cut)
+    # The cut line is parallel to the shortest side, meaning it is perpendicular to the longest side.
+    # We pass the angle of the normal. If we want the cut line to be parallel to the shortest side,
+    # its angle should be shortest_axis_angle. But split_parcel expects the angle of the CUT line?
+    # Wait, split_polygon_by_ratio takes angle_deg as the angle of the cut line.
+    
+    def run_split(angle_deg):
+        result_polys = []
+        current_poly = poly
+        remaining_share = 1.0
+        
+        for i in range(len(normalized_shares) - 1):
+            target_ratio = normalized_shares[i] / remaining_share
+            parts = split_polygon_by_ratio(current_poly, target_ratio, angle_deg)
+            if not parts or len(parts) < 2:
+                break
+            # To ensure we keep splitting along the correct axis, we should sort parts by their projection
+            # along the sweep axis. split_polygon_by_ratio returns them sorted.
+            result_polys.append(parts[0])
+            current_poly = parts[1]
+            remaining_share -= normalized_shares[i]
+        
+        result_polys.append(current_poly)
+        return result_polys
+
+    # Strategy 1: Cut parallel to shortest side
+    s1_polys = run_split(shortest_axis_angle)
+    if len(s1_polys) == len(shares):
+        strategies.append({"name": "Compact Cut (Parallel to Shortest Side)", "polys": s1_polys, "angle": shortest_axis_angle})
+        
+    # Strategy 2: Cut parallel to longest side
+    s2_polys = run_split(longest_axis_angle)
+    if len(s2_polys) == len(shares):
+        strategies.append({"name": "Longitudinal Cut (Parallel to Longest Side)", "polys": s2_polys, "angle": longest_axis_angle})
+
+    # Strategy 3: Perpendicular to Road (if road exists)
+    if frontage_coords and len(frontage_coords) >= 2:
+        p1 = frontage_coords[0]
+        p2 = frontage_coords[-1]
+        front_angle = get_angle(p1, p2)
+        cut_angle = front_angle + 90
+        s3_polys = run_split(cut_angle)
+        if len(s3_polys) == len(shares):
+            strategies.append({"name": "Road Access Cut (Perpendicular to Road)", "polys": s3_polys, "angle": cut_angle})
+            
+    # Strategy 4: Perpendicular to River (if river exists)
+    if river_frontage_coords and len(river_frontage_coords) >= 2:
+        p1 = river_frontage_coords[0]
+        p2 = river_frontage_coords[-1]
+        river_angle = get_angle(p1, p2)
+        cut_angle = river_angle + 90
+        s4_polys = run_split(cut_angle)
+        if len(s4_polys) == len(shares):
+            strategies.append({"name": "River Access Cut (Perpendicular to River)", "polys": s4_polys, "angle": cut_angle})
+            
+    # Remove duplicates based on angle similarity (modulo 180)
+    unique_strategies = []
+    seen_angles = []
+    for s in strategies:
+        angle_mod = s["angle"] % 180
+        is_duplicate = False
+        for sa in seen_angles:
+            if abs(sa - angle_mod) < 5 or abs(sa - angle_mod) > 175:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            unique_strategies.append(s)
+            seen_angles.append(angle_mod)
+
+    return unique_strategies
+

@@ -386,7 +386,7 @@ def get_plot_details_and_inspection():
                             if not text_data.startswith("<") and len(text_data) > 1000:
                                 try:
                                     pdf_bytes = base64.b64decode(text_data)
-                                    if pdf_bytes.startswith(b"%PDF"):
+                                    if b"%PDF" in pdf_bytes[:20]:
                                         os.makedirs("static/reports", exist_ok=True)
                                         with open(rel_path, "wb") as f_pdf:
                                             f_pdf.write(pdf_bytes)
@@ -414,6 +414,19 @@ def get_plot_details_and_inspection():
                         p_lon = g_xmin + pct_x * (g_xmax - g_xmin)
                         p_lat = g_ymin + pct_y * (g_ymax - g_ymin)
 
+            # Extract area from PDF if possible
+            official_area_ha = None
+            if report_url:
+                import os
+                pdf_path = os.path.join(app.root_path, report_url.lstrip("/"))
+                if os.path.exists(pdf_path):
+                    try:
+                        import pdf_parser
+                        with open(pdf_path, "rb") as f_pdf:
+                            official_area_ha = pdf_parser.extract_area_from_pdf_bytes(f_pdf.read())
+                    except Exception as e:
+                        pass
+
             return jsonify({
                 "success": True,
                 "cached": True,
@@ -425,6 +438,7 @@ def get_plot_details_and_inspection():
                     "pniu": parcel.pniu,
                     "area": parcel.area,
                     "area_acres": parcel.area / 4046.8564 if parcel.area else 0.0,
+                    "official_area_ha": official_area_ha,
                     "perimeter": parcel.perimeter,
                     "lat": p_lat,
                     "lon": p_lon,
@@ -651,7 +665,7 @@ def get_plot_details_and_inspection():
                         if not text_data.startswith("<") and len(text_data) > 1000:
                             try:
                                 pdf_bytes = base64.b64decode(text_data)
-                                if pdf_bytes.startswith(b"%PDF"):
+                                if b"%PDF" in pdf_bytes[:20]:
                                     os.makedirs("static/reports", exist_ok=True)
                                     filename = f"{giscode}_{plot_no}.pdf"
                                     filepath = os.path.join("static", "reports", filename)
@@ -731,6 +745,19 @@ def get_plot_details_and_inspection():
                 centroid_lon = g_xmin + pct_x * (g_xmax - g_xmin)
                 centroid_lat = g_ymin + pct_y * (g_ymax - g_ymin)
 
+    # Extract Area from PDF if it was saved
+    official_area_ha = None
+    if local_report_url:
+        import os
+        pdf_path = os.path.join(app.root_path, local_report_url.lstrip("/"))
+        if os.path.exists(pdf_path):
+            try:
+                import pdf_parser
+                with open(pdf_path, "rb") as f_pdf:
+                    official_area_ha = pdf_parser.extract_area_from_pdf_bytes(f_pdf.read())
+            except Exception as e:
+                pass
+
     return jsonify({
         "success": True,
         "cached": False,
@@ -742,6 +769,7 @@ def get_plot_details_and_inspection():
             "pniu": pniu,
             "area": area_sqm,
             "area_acres": area_sqm / 4046.8564 if area_sqm else None,
+            "official_area_ha": official_area_ha,
             "perimeter": perimeter_m,
             "lat": centroid_lat,
             "lon": centroid_lon,
@@ -847,70 +875,55 @@ def export_csv(plot_no):
     )
 
 @app.route("/api/parcel/<plot_no>/nearby", methods=["GET"])
-def get_nearby_features(plot_no):
+def get_nearby_infrastructure(plot_no):
     parcel_id = request.args.get("parcel_id")
-    radius = float(request.args.get("radius", 200)) # Default 200m buffer
+    gis_code = request.args.get("gis_code")
     
-    if parcel_id and parcel_id not in ("null", "undefined", ""):
-        parcel = Parcel.query.get(parcel_id)
-    else:
-        parcel = Parcel.query.filter_by(plot_no=plot_no).order_by(Parcel.id.desc()).first()
+    if not parcel_id or not gis_code:
+        return jsonify({"error": "Missing parcel_id or gis_code"}), 400
         
-    if not parcel:
-        return jsonify({"error": "Parcel not found"}), 404
-
-    # Get bounding box of the parcel
-    vertices = parcel.vertices
-    if not vertices:
-         return jsonify({"error": "Parcel has no geometric data"}), 400
-         
-    lats = [v.lat for v in vertices]
-    lons = [v.lon for v in vertices]
+    db = getattr(g, '_database', None)
+    if db is None:
+        db = g._database = sqlite3.connect(DATABASE_FILE)
     
-    min_lat, max_lat = min(lats), max(lats)
-    min_lon, max_lon = min(lons), max(lons)
+    cur = db.cursor()
+    cur.execute("SELECT geometry_json FROM parcels WHERE id = ?", (parcel_id,))
+    row = cur.fetchone()
     
-    # Calculate buffer in degrees (approximate) for 500m road detection
-    radius_m = 500.0
-    lat_buffer = radius_m / 111000.0
-    lon_buffer = radius_m / (111000.0 * math.cos(math.radians((min_lat + max_lat) / 2)))
-    
-    bbox_south = min_lat - lat_buffer
-    bbox_north = max_lat + lat_buffer
-    bbox_west = min_lon - lon_buffer
-    bbox_east = max_lon + lon_buffer
-    
-    # Compute CV detection bounding box format: south,west,north,east
-    bbox_str = f"{bbox_south},{bbox_west},{bbox_north},{bbox_east}"
-    
-    try:
-        osm_data = cv_detector.detect_features(bbox_str)
+    if not row or not row[0]:
+        return jsonify({"error": "Parcel geometry not found"}), 404
         
-        # Filter trees and wells to ONLY be inside the parcel
-        import pyproj
-        from shapely.geometry import Polygon, Point
-        transformer_inv = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32645", always_xy=True)
-        
-        poly_coords = [(v.x, v.y) for v in sorted(vertices, key=lambda v: v.sequence_order)]
-        parcel_poly = Polygon(poly_coords)
-        if not parcel_poly.is_valid:
-            parcel_poly = parcel_poly.buffer(0)
+    geom_data = json.loads(row[0])
+    vertices = []
+    if "vertices" in geom_data:
+        for v in geom_data["vertices"]:
+            vertices.append(Vertex(v["x"], v["y"]))
             
-        filtered_elements = []
-        for el in osm_data.get("elements", []):
-            if el["type"] == "node" and "tags" in el and ("natural" in el["tags"] or "man_made" in el["tags"]):
-                x_utm, y_utm = transformer_inv.transform(el["lon"], el["lat"])
-                if parcel_poly.contains(Point(x_utm, y_utm)):
-                    filtered_elements.append(el)
-            else:
-                filtered_elements.append(el)
-        osm_data["elements"] = filtered_elements
+    if not vertices:
+        return jsonify({"error": "No valid geometry"}), 400
         
-        return jsonify({"success": True, "osm_data": osm_data})
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
+    poly_coords = [(v.x, v.y) for v in vertices]
+    if poly_coords[0] != poly_coords[-1]:
+        poly_coords.append(poly_coords[0])
+    poly = Polygon(poly_coords)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+        
+    import math
+    minx, miny, maxx, maxy = poly.bounds
+    lat_buffer = 100.0 / 111000.0
+    lon_buffer = 100.0 / (111000.0 * math.cos(math.radians((miny + maxy) / 2)))
+    
+    import cv_detector
+    gis_features = cv_detector.query_bihar_gis_features(
+        minx - lon_buffer, miny - lat_buffer, maxx + lon_buffer, maxy + lat_buffer
+    )
+    
+    return jsonify({
+        "success": True,
+        "roads": gis_features.get("roads", []),
+        "rivers": gis_features.get("rivers", [])
+    })
 
 @app.route("/api/parcel/<plot_no>/subdivide", methods=["POST"])
 def subdivide_parcel(plot_no):
@@ -922,8 +935,9 @@ def subdivide_parcel(plot_no):
     if not shares or not isinstance(shares, list):
          return jsonify({"error": "Missing or invalid 'shares' list"}), 400
          
-    frontage = data.get("frontage", []) # List of [x_utm, y_utm] for the road edge
     trees_and_wells = data.get("features", []) # List of dicts: {"type": "tree", "x": ..., "y": ...}
+    parcel_info = data.get("parcel_info", {})
+    user_preferences = data.get("user_preferences", "")
     
     parcel_id = request.args.get("parcel_id")
     if parcel_id and parcel_id not in ("null", "undefined", ""):
@@ -957,15 +971,100 @@ def subdivide_parcel(plot_no):
         def gps_to_utm(lon, lat):
              return transformer_inv.transform(lon, lat)
     except Exception:
-         # Fallback approximation (very rough)
          return jsonify({"error": "Coordinate transformation failed"}), 500
          
-    frontage_utm = [gps_to_utm(lon, lat) for lon, lat in frontage] if frontage else []
-         
-    # Run the subdivision algorithm
+    # Query Bihar GIS MapServer for real roads and rivers
+    lats = [v.lat for v in vertices]
+    lons = [v.lon for v in vertices]
+    radius_m = 100.0
+    lat_buffer = radius_m / 111000.0
+    lon_buffer = radius_m / (111000.0 * math.cos(math.radians((min(lats) + max(lats)) / 2)))
+    
+    min_lon = min(lons) - lon_buffer
+    max_lon = max(lons) + lon_buffer
+    min_lat = min(lats) - lat_buffer
+    max_lat = max(lats) + lat_buffer
+    
+    import cv_detector
+    gis_features = cv_detector.query_bihar_gis_features(min_lon, min_lat, max_lon, max_lat)
+    
+    frontage_utm = []
+    if gis_features.get("roads"):
+        # Just pick the first road path for frontage strategy
+        road_gps_path = gis_features["roads"][0]["path"]
+        frontage_utm = [gps_to_utm(lon, lat) for lon, lat in road_gps_path]
+        
+    river_utm = []
+    if gis_features.get("rivers"):
+        river_gps_path = gis_features["rivers"][0]["path"]
+        river_utm = [gps_to_utm(lon, lat) for lon, lat in river_gps_path]
+        
+    nearby_river = len(gis_features.get("rivers", [])) > 0
+    
+    import llm_expert
     try:
-         sub_polys = subdivide.split_parcel(poly, shares, frontage_utm)
+         strategies = subdivide.generate_strategies(poly, shares, frontage_utm, river_utm)
+         if not strategies:
+             return jsonify({"error": "Failed to generate any valid division strategies"}), 500
+             
+         import shapely.geometry
+         # Pre-calculate sub-plot stats for ALL strategies so LLM can make informed decisions
+         for strat in strategies:
+             strat_info = []
+             for sp in strat["polys"]:
+                 front_len = 0
+                 if frontage_utm:
+                     front_line = shapely.geometry.LineString(frontage_utm)
+                     front_len = sp.buffer(5.0).intersection(front_line).length
+                     
+                 river_len = 0
+                 if river_utm:
+                     river_line = shapely.geometry.LineString(river_utm)
+                     river_len = sp.buffer(5.0).intersection(river_line).length
+                 
+                 c_feats = 0
+                 for feat in trees_and_wells:
+                     fx, fy = gps_to_utm(feat["x"], feat["y"])
+                     if sp.contains(shapely.geometry.Point(fx, fy)):
+                         c_feats += 1
+                 strat_info.append({"frontage_m": front_len, "river_frontage_m": river_len, "features": c_feats})
+             strat["sub_plot_stats"] = strat_info
+             
+         # Prepare parcel info for LLM
+         payload_data = {
+             "area_sqm": poly.area,
+             "shares": shares,
+             "has_frontage": len(frontage_utm) > 0,
+             "nearby_river": nearby_river,
+             "features": trees_and_wells,
+             "parcel_info": parcel_info,
+             "user_preferences": user_preferences,
+             "vision_context": "None"
+         }
+         
+         # 4. Ask LLM
+         llm_result = llm_expert.consult_llm_for_division(payload_data, strategies)
+         
+         best_idx = 0
+         explanation = ""
+         llm_failed = False
+         
+         if llm_result.get("success"):
+             best_idx = llm_result.get("recommended_index", 0)
+             if best_idx < 0 or best_idx >= len(strategies):
+                 best_idx = 0
+             explanation = llm_result.get("explanation")
+         else:
+             llm_failed = True
+             explanation = "LLM Server (LM Studio) unreachable or failed. Falling back to the default algorithmic strategy (Compact Cut)."
+             
+         best_strategy = strategies[best_idx]
+         sub_polys = best_strategy["polys"]
+         strategy_name = best_strategy["name"]
+         
     except Exception as e:
+         import traceback
+         traceback.print_exc()
          return jsonify({"error": f"Subdivision failed: {str(e)}"}), 500
          
     results = []
@@ -988,7 +1087,7 @@ def subdivide_parcel(plot_no):
         if frontage_utm:
              # Basic check if the subpolygon touches the frontage line
              front_line = shapely.geometry.LineString(frontage_utm)
-             intersection = sp.intersection(front_line)
+             intersection = sp.buffer(5.0).intersection(front_line)
              frontage_length = intersection.length
              
         results.append({
@@ -1009,7 +1108,10 @@ def subdivide_parcel(plot_no):
         
     return jsonify({
         "type": "FeatureCollection",
-        "features": results
+        "features": results,
+        "llm_explanation": explanation,
+        "llm_failed": llm_failed,
+        "strategy_name": strategy_name
     })
 
 @app.route("/api/parcel/<plot_no>/generate_report", methods=["POST"])
@@ -1026,6 +1128,7 @@ def generate_report(plot_no):
     features = data.get("features", [])
     subdivisions = data.get("subdivisions", [])
     frontage = data.get("frontage", [])
+    nearby_river = data.get("nearby_river", False)
     parcel_info = data.get("parcel_info", {})
     
     import report_generator

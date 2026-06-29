@@ -8,7 +8,6 @@ let vectorLayer;
 let osmVectorLayer;
 let kurraVectorLayer;
 let osmFeaturesCache = []; // To store trees/wells to pass to backend
-window.roadFrontage = null; // Store road explicitly
 let currentParcelData = null;
 let currentGisCode = "";
 let currentLevels = "";
@@ -65,12 +64,33 @@ const vectorStyleFunction = function(feature) {
         
         // 3. Side length labels (midpoints)
         const segmentLengths = feature.get('segment_lengths');
-        if (segmentLengths) {
-            for (let i = 0; i < coordinates.length - 1; i++) {
-                const p1 = coordinates[i];
-                const p2 = coordinates[i+1];
-                
-                const midX = (p1[0] + p2[0]) / 2;
+    const riverAdjacentSegments = feature.get('river_adjacent_segments') || [];
+    
+    if (segmentLengths) {
+        for (let i = 0; i < coordinates.length - 1; i++) {
+            const p1 = coordinates[i];
+            const p2 = coordinates[i+1];
+            
+            // Highlight river adjacency with a thick blue line
+            if (riverAdjacentSegments.includes(i)) {
+                styles.push(new ol.style.Style({
+                    geometry: new ol.geom.LineString([p1, p2]),
+                    stroke: new ol.style.Stroke({
+                        color: 'rgba(0, 191, 255, 0.8)', // Deep sky blue
+                        width: 6
+                    }),
+                    text: new ol.style.Text({
+                        text: `River Adj (${feature.get('river_name')})`,
+                        font: 'bold 12px Inter, sans-serif',
+                        fill: new ol.style.Fill({ color: '#00bfff' }),
+                        stroke: new ol.style.Stroke({ color: '#fff', width: 3 }),
+                        placement: 'line',
+                        offsetY: 15
+                    })
+                }));
+            }
+            
+            const dx = p2[0] - p1[0];              const midX = (p1[0] + p2[0]) / 2;
                 const midY = (p1[1] + p2[1]) / 2;
                 
                 const lenVal = segmentLengths[i];
@@ -95,14 +115,67 @@ const vectorStyleFunction = function(feature) {
 
 // 1. Initialize Map
 function initMap() {
-    // Google Satellite Imagery layer
-    const googleSatelliteLayer = new ol.layer.Tile({
-        title: "Google Satellite",
+    // ArcGIS Hybrid Basemap (Imagery + Labels)
+    const arcgisHybridBase = new ol.layer.Tile({
+        title: "ArcGIS Satellite",
         type: "base",
         visible: true,
         source: new ol.source.XYZ({
-            url: "https://mt{0-3}.google.com/vt/lyrs=y&hl=en&x={x}&y={y}&z={z}&s=Ga",
-            attributions: "© Google Maps Satellite Overlay"
+            url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attributions: "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+            maxZoom: 17 // Lowered to 17 to guarantee we stretch the last valid image instead of getting Esri's "Map data not yet available" grey tile
+        })
+    });
+    const arcgisHybridLabels = new ol.layer.Tile({
+        title: "ArcGIS Labels",
+        visible: true,
+        source: new ol.source.XYZ({
+            url: "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+            maxZoom: 17
+        })
+    });
+
+    // Bihar GIS Native Layers
+    const nhRoadsLayer = new ol.layer.Tile({
+        title: "National Highways",
+        visible: true,
+        source: new ol.source.TileArcGISRest({
+            url: "https://gisserver.bihar.gov.in/arcgis/rest/services/RCD_DEPT/NHRoads/MapServer"
+        })
+    });
+    const shRoadsLayer = new ol.layer.Tile({
+        title: "State Highways",
+        visible: true,
+        source: new ol.source.TileArcGISRest({
+            url: "https://gisserver.bihar.gov.in/arcgis/rest/services/RCD_DEPT/SHRoads/MapServer"
+        })
+    });
+    const mdrRoadsLayer = new ol.layer.Tile({
+        title: "Major District Roads",
+        visible: true,
+        source: new ol.source.TileArcGISRest({
+            url: "https://gisserver.bihar.gov.in/arcgis/rest/services/RCD_DEPT/MDR/MapServer"
+        })
+    });
+    const villageRoadsLayer = new ol.layer.Tile({
+        title: "Village Roads",
+        visible: true,
+        source: new ol.source.TileArcGISRest({
+            url: "https://gisserver.bihar.gov.in/arcgis/rest/services/RWD/Village_Road/MapServer"
+        })
+    });
+    const riversLayer = new ol.layer.Tile({
+        title: "Rivers",
+        visible: true,
+        source: new ol.source.TileArcGISRest({
+            url: "https://gisserver.bihar.gov.in/arcgis/rest/services/WATER_IRRIGATION/Rivers/MapServer"
+        })
+    });
+    const streamsLayer = new ol.layer.Tile({
+        title: "Streams",
+        visible: true,
+        source: new ol.source.TileArcGISRest({
+            url: "https://gisserver.bihar.gov.in/arcgis/rest/services/WATER_IRRIGATION/IrrigationStreams/MapServer"
         })
     });
 
@@ -184,11 +257,7 @@ function initMap() {
         source: new ol.source.Vector(),
         style: function(feature) {
             const props = feature.getProperties();
-            if (props.highway) {
-                return new ol.style.Style({
-                    stroke: new ol.style.Stroke({ color: '#ffcc00', width: 4 })
-                });
-            } else if (props.natural === 'tree' || props.natural === 'wood' || props.landuse === 'orchard') {
+            if (props.natural === 'tree' || props.natural === 'wood' || props.landuse === 'orchard') {
                 return new ol.style.Style({
                     image: new ol.style.Circle({
                         radius: 6,
@@ -234,7 +303,11 @@ function initMap() {
     // Setup map view centered on Patna, Bihar
     map = new ol.Map({
         target: "map",
-        layers: [googleSatelliteLayer, plotLyr, selPlotLyr, osmVectorLayer, vectorLayer, kurraVectorLayer],
+        layers: [
+            arcgisHybridBase, arcgisHybridLabels, 
+            nhRoadsLayer, shRoadsLayer, mdrRoadsLayer, villageRoadsLayer, riversLayer, streamsLayer,
+            plotLyr, selPlotLyr, osmVectorLayer, vectorLayer, kurraVectorLayer
+        ],
         view: new ol.View({
             projection: "EPSG:4326",
             center: [85.1376, 25.5941], // Patna GPS Coordinates
@@ -515,76 +588,7 @@ function setupEventListeners() {
         }
     });
 
-    $("#btn-load-nearby").click(function() {
-        if (!currentParcelData || !currentParcelData.parcel) return;
-        const plotNo = currentParcelData.parcel.plot_no;
-        const parcelId = currentParcelData.parcel.id;
-        
-        showLoading(true, "Fetching nearby features from OpenStreetMap...");
-        $.get(`/api/parcel/${plotNo}/nearby`, { parcel_id: parcelId, radius: 200 }, function(res) {
-            showLoading(false);
-            if (res.success && res.osm_data) {
-                osmVectorLayer.getSource().clear();
-                osmFeaturesCache = [];
-                
-                // Parse OSM JSON
-                const nodes = {};
-                res.osm_data.elements.forEach(el => {
-                    if (el.type === "node") {
-                        nodes[el.id] = [el.lon, el.lat];
-                        if (el.tags && (el.tags.natural === 'tree' || el.tags.man_made === 'water_well')) {
-                            // Extract trees and wells for backend point-in-polygon
-                            const pt = new ol.geom.Point([el.lon + offsetX, el.lat + offsetY]);
-                            const f = new ol.Feature({ geometry: pt });
-                            f.setProperties(el.tags);
-                            osmVectorLayer.getSource().addFeature(f);
-                            
-                            // It's a UTM coordinate needed for backend
-                            // Just pass GPS directly and backend can project, wait backend expects UTM or GPS?
-                            // App.py says `pt = Point(feat["x"], feat["y"])` but later `sp.contains(pt)`.
-                            // Subpolygon is in UTM! So we must pass UTM to backend. Let's pass GPS and let backend project if we didn't do it.
-                            // To keep it simple, we will send GPS coordinates since our python uses GPS... wait.
-                            // Actually, let's just let backend figure it out. We will pass x,y as GPS for now.
-                            osmFeaturesCache.push({
-                                type: el.tags.natural === 'tree' ? 'tree' : 'well',
-                                x: el.lon,
-                                y: el.lat
-                            });
-                        }
-                    }
-                });
-                
-                
-                // Parse Ways
-                res.osm_data.elements.forEach(el => {
-                    if (el.type === "way" && el.nodes) {
-                        const coords = el.nodes.map(nid => {
-                            const c = nodes[nid];
-                            return c ? [c[0] + offsetX, c[1] + offsetY] : null;
-                        }).filter(c => c !== null);
-                        
-                        if (coords.length > 1) {
-                            const line = new ol.geom.LineString(coords);
-                            const f = new ol.Feature({ geometry: line });
-                            f.setProperties(el.tags || {highway: 'unclassified'});
-                            osmVectorLayer.getSource().addFeature(f);
-                        }
-                    }
-                });
-                
-                // Enable manual tools
-                $("#btn-add-tree, #btn-add-well, #btn-draw-road, #btn-delete-obj").prop("disabled", false);
-                updateOsmCache();
-                
-                showToast("Nearby features loaded", "success");
-            } else {
-                showToast("Error parsing nearby features", "error");
-            }
-        }).fail(function() {
-            showLoading(false);
-            showToast("Failed to fetch nearby features", "error");
-        });
-    });
+    // Load nearby button logic removed as we use native ArcGIS MapServer layers.
     
     let drawInteraction = null;
     let selectInteraction = null;
@@ -593,7 +597,6 @@ function setupEventListeners() {
         if (drawInteraction) map.removeInteraction(drawInteraction);
         if (selectInteraction) map.removeInteraction(selectInteraction);
         
-        const isRoad = type === 'LineString';
         drawInteraction = new ol.interaction.Draw({
             source: osmVectorLayer.getSource(),
             type: type
@@ -601,15 +604,11 @@ function setupEventListeners() {
         
         drawInteraction.on('drawend', function(e) {
             const f = e.feature;
-            if (isRoad) {
-                f.setProperties({ highway: 'unclassified', manual: true });
-                showToast("Road drawn successfully", "success");
-            } else {
-                const objType = prompt("What is this object? (e.g. tree, well)", "tree");
-                if (!objType) {
-                    setTimeout(() => osmVectorLayer.getSource().removeFeature(f), 10);
-                    return;
-                }
+            const objType = prompt("What is this object? (e.g. tree, well)", "tree");
+            if (!objType) {
+                setTimeout(() => osmVectorLayer.getSource().removeFeature(f), 10);
+                return;
+            }
                 if (objType.toLowerCase() === 'tree') {
                     f.setProperties({ natural: 'tree', manual: true });
                 } else if (objType.toLowerCase() === 'well') {
@@ -618,14 +617,14 @@ function setupEventListeners() {
                     f.setProperties({ custom_type: objType, manual: true });
                 }
                 showToast(objType + " added", "success");
-            }
+            
             map.removeInteraction(drawInteraction);
             drawInteraction = null;
             updateOsmCache();
         });
         
         map.addInteraction(drawInteraction);
-        showToast("Click on map to " + (isRoad ? "draw road (double click to finish)" : "place object"), "info");
+        showToast("Click on map to place object", "info");
     }
 
     function enableDelete() {
@@ -654,8 +653,7 @@ function setupEventListeners() {
 
     function updateOsmCache() {
         osmFeaturesCache = [];
-        window.roadFrontage = null; // Cache road specifically for subdivision
-        let treeCount = 0, wellCount = 0, roadCount = 0;
+        let treeCount = 0, wellCount = 0;
         
         osmVectorLayer.getSource().getFeatures().forEach(f => {
             const props = f.getProperties();
@@ -670,14 +668,11 @@ function setupEventListeners() {
                     x: coords[0] - offsetX,
                     y: coords[1] - offsetY
                 });
-            } else if (geom.getType() === 'LineString' && props.highway) {
-                roadCount++;
-                window.roadFrontage = geom.getCoordinates().map(c => [c[0] - offsetX, c[1] - offsetY]);
             }
         });
         
-        if (osmFeaturesCache.length > 0 || roadCount > 0) {
-            $("#feature-counts").html(`Trees: <b>${treeCount}</b> | Wells: <b>${wellCount}</b> | Roads: <b>${roadCount}</b>`);
+        if (osmFeaturesCache.length > 0) {
+            $("#feature-counts").html(`Trees: <b>${treeCount}</b> | Wells: <b>${wellCount}</b>`);
             $("#feature-summary").show();
         } else {
             $("#feature-summary").hide();
@@ -686,7 +681,6 @@ function setupEventListeners() {
 
     $("#btn-add-tree").click(() => enableDraw('Point'));
     $("#btn-add-well").click(() => enableDraw('Point'));
-    $("#btn-draw-road").click(() => enableDraw('LineString'));
     $("#btn-delete-obj").click(() => enableDelete());
 
     $("#btn-subdivide").click(function() {
@@ -708,12 +702,11 @@ function setupEventListeners() {
             if (Math.abs(sum - 100) > 0.1) return showToast("Shares must sum to 100", "warning");
         }
         
-        // We need frontage edge. For simplicity, we can pass nothing initially.
-        // Also pass cached features
+        // We need to pass cached features
         const payload = {
             shares: shares,
             features: osmFeaturesCache,
-            frontage: window.roadFrontage || []
+            parcel_info: currentParcelData.parcel
         };
         
         showLoading(true, "Calculating Kurra Division...");
@@ -730,6 +723,20 @@ function setupEventListeners() {
                     
                     // We need to shift the features by the user's offset
                     let htmlContent = "";
+                    
+                    if (res.strategy_name) {
+                        // Save for PDF generation
+                        window.lastStrategyName = res.strategy_name;
+                        window.lastLlmExplanation = res.llm_explanation;
+                        window.lastLlmFailed = res.llm_failed;
+                        
+                        htmlContent += `<div style="background: rgba(255, 51, 102, 0.1); border-left: 3px solid #ff3366; padding: 10px; margin-bottom: 15px; border-radius: 4px;">
+                          <strong style="color: #ff3366;">Strategy: ${res.strategy_name}</strong>
+                          <p style="margin: 5px 0 0 0; font-size: 0.9em; line-height: 1.4;">${res.llm_explanation || ""}</p>
+                          ${res.llm_failed ? '<div style="color: #ffa500; font-size: 0.8em; margin-top: 5px;">⚠️ LLM Service Offline - Used mathematical fallback.</div>' : ''}
+                        </div>`;
+                    }
+
                     res.features.forEach(feat => {
                         const coords = feat.geometry.coordinates[0].map(c => [c[0] + offsetX, c[1] + offsetY]);
                         const olFeat = new ol.Feature({ geometry: new ol.geom.Polygon([coords]) });
@@ -787,6 +794,9 @@ function setupEventListeners() {
                 }
             });
         });
+        
+        currentParcelData.parcel.llm_explanation = window.lastLlmExplanation;
+        currentParcelData.parcel.strategy_name = window.lastStrategyName;
         
         const payload = {
             features: osmFeaturesCache,
@@ -979,6 +989,9 @@ function selectPlotByNumber(plotNo) {
             displayParcelDetails(res);
             zoomToParcel();
             showToast(`Plot ${plotNo} details loaded successfully`, "success");
+            
+            // Asynchronously fetch nearby features (rivers, trees, wells)
+            fetchNearbyFeatures(plotNo, res.parcel.id, currentGisCode);
         } else {
             showToast(res.error || "Failed to retrieve plot details", "error");
         }
@@ -986,6 +999,30 @@ function selectPlotByNumber(plotNo) {
         showLoading(false);
         const err = xhr.responseJSON ? xhr.responseJSON.error : "Failed to query backend server";
         showToast(err, "error");
+    });
+}
+
+function fetchNearbyFeatures(plotNo, parcelId, gisCode) {
+    $("#nearby-info").html('<i class="fa fa-spinner fa-spin"></i> Nearby Infrastructure: Checking...');
+    $.get(`/api/parcel/${plotNo}/nearby`, { parcel_id: parcelId, gis_code: gisCode }, function(res) {
+        if (res && res.success) {
+            let infoText = [];
+            if (res.roads && res.roads.length > 0) {
+                infoText.push(`<span style="color: #48bb78;"><i class="fa fa-road"></i> Road Detected (${res.roads.length})</span>`);
+            }
+            if (res.rivers && res.rivers.length > 0) {
+                infoText.push(`<span style="color: #4299e1;"><i class="fa fa-tint"></i> River/Stream Detected</span>`);
+            }
+            if (infoText.length > 0) {
+                $("#nearby-info").html("<strong>Nearby Infrastructure:</strong><br>" + infoText.join("<br>"));
+            } else {
+                $("#nearby-info").html('<i class="fa fa-info-circle"></i> Nearby Infrastructure: None detected within 100m');
+            }
+        } else {
+            $("#nearby-info").html('<i class="fa fa-exclamation-triangle" style="color: #ecc94b;"></i> Failed to check infrastructure');
+        }
+    }, "json").fail(function() {
+        $("#nearby-info").html('<i class="fa fa-exclamation-triangle" style="color: #ecc94b;"></i> Failed to check infrastructure');
     });
 }
 
@@ -1011,10 +1048,19 @@ function displayParcelDetails(data) {
     }
     
     // Update Measurements
-    const areaVal = data.parcel.area;
-    $("#val-area-sqm").text(areaVal != null ? `${areaVal.toFixed(1)} m²` : "--");
-    $("#val-area-acres").text(areaVal != null ? `${(areaVal / 4046.8564).toFixed(3)} acres` : "--");
-    $("#val-area-hectares").text(areaVal != null ? `${(areaVal / 10000.0).toFixed(3)} ha` : "--");
+    const officialArea = data.parcel.official_area_ha;
+    const calcArea = data.parcel.area;
+    
+    if (officialArea != null) {
+        $("#val-area-hectares").html(`<span style="color:#00e5ff; font-weight:bold;" title="Official Area from BhuNaksha LPM">${officialArea.toFixed(4)} ha (Official)</span>`);
+        $("#val-area-acres").text(`${(officialArea * 2.47105).toFixed(3)} acres`);
+        $("#val-area-sqm").text(`${(officialArea * 10000).toFixed(1)} m²`);
+    } else {
+        $("#val-area-sqm").text(calcArea != null ? `${calcArea.toFixed(1)} m² (Calc)` : "--");
+        $("#val-area-acres").text(calcArea != null ? `${(calcArea / 4046.8564).toFixed(3)} acres` : "--");
+        $("#val-area-hectares").text(calcArea != null ? `${(calcArea / 10000.0).toFixed(4)} ha` : "--");
+    }
+    
     $("#val-perimeter").text(data.parcel.perimeter != null ? `${data.parcel.perimeter.toFixed(1)} m` : "--");
     $("#val-vertices-count").text(data.vertices.length || "--");
     
@@ -1039,6 +1085,12 @@ function displayParcelDetails(data) {
     $("#btn-export-csv").prop("disabled", false);
     $("#btn-load-nearby").prop("disabled", false);
     $("#btn-subdivide").prop("disabled", false);
+    
+    // Enable Manual Map Overrides
+    $("#btn-add-tree").prop("disabled", false);
+    $("#btn-add-well").prop("disabled", false);
+    $("#btn-draw-road").prop("disabled", false);
+    $("#btn-delete-obj").prop("disabled", false);
     
     // Enable PDF controls
     if (data.report && data.report.url) {

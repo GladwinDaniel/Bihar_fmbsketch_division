@@ -4,7 +4,6 @@ import tempfile
 import cv2
 import numpy as np
 from fpdf import FPDF
-from cv_detector import fetch_satellite_image
 
 def generate_kurra_report(plot_no, parcel_vertices, features, subdivisions, frontage_coords, parcel_info=None):
     lats = [v[1] for v in parcel_vertices]
@@ -17,11 +16,14 @@ def generate_kurra_report(plot_no, parcel_vertices, features, subdivisions, fron
     lat_buffer = 0.0005
     lon_buffer = 0.0005
     
-    img_rgb, tl_lat, tl_lon, br_lat, br_lon = fetch_satellite_image(
-        min_lat - lat_buffer, min_lon - lon_buffer, max_lat + lat_buffer, max_lon + lon_buffer, zoom=19
-    )
+    # Create a white background instead of fetching satellite imagery
+    img_w, img_h = 800, 600
+    img_rgb = np.ones((img_h, img_w, 3), dtype=np.uint8) * 255
     
-    img_h, img_w, _ = img_rgb.shape
+    tl_lat = max_lat + lat_buffer
+    br_lat = min_lat - lat_buffer
+    tl_lon = min_lon - lon_buffer
+    br_lon = max_lon + lon_buffer
     
     def deg2pix(lat, lon):
         x = int((lon - tl_lon) / (br_lon - tl_lon) * img_w)
@@ -77,60 +79,103 @@ def generate_kurra_report(plot_no, parcel_vertices, features, subdivisions, fron
     os.close(fd)
     cv2.imwrite(temp_img_path, img_bgr)
     
-    # PDF Generation
+    # Generate PDF Document
     pdf = FPDF()
     pdf.add_page()
     
-    pdf.set_font("helvetica", 'B', 16)
-    pdf.cell(0, 10, f"Land Division (Kurra) Report - Plot {plot_no}", new_x="LMARGIN", new_y="NEXT", align='C')
+    # Header
+    pdf.set_font("helvetica", "B", 16)
+    pdf.cell(0, 10, f"Kurra Division Report: Plot {plot_no}", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(5)
     
-    if parcel_info:
-        pdf.set_font("helvetica", 'B', 12)
-        pdf.cell(0, 8, "Land Parcel Information", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("helvetica", size=10)
-        
-        info_str = f"District: {parcel_info.get('district_name', 'N/A')} | " \
-                   f"Sub-Division: {parcel_info.get('subdiv_name', 'N/A')} | " \
-                   f"Circle: {parcel_info.get('circle_name', 'N/A')} | " \
-                   f"Mouza: {parcel_info.get('mouza_name', 'N/A')}"
-        pdf.cell(0, 6, info_str, new_x="LMARGIN", new_y="NEXT")
-        
-        area = parcel_info.get('area_sqm', 0)
-        area_str = f"Total Area: {area/4046.8564:.3f} acres ({area:.1f} sq.m)"
-        pdf.cell(0, 6, area_str, new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(5)
+    # ---------------------------------------------------------
+    # Section 1: Land Details & LPM Details
+    # ---------------------------------------------------------
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(0, 8, "1. Land Details & LPM Details", new_x="LMARGIN", new_y="NEXT", border="B")
+    pdf.ln(3)
     
+    pdf.set_font("helvetica", "", 10)
+    if parcel_info:
+        pdf.cell(60, 6, f"District: {parcel_info.get('district', 'N/A')}")
+        pdf.cell(60, 6, f"Sub-Division: {parcel_info.get('subdivision', 'N/A')}")
+        pdf.cell(60, 6, f"Circle: {parcel_info.get('circle', 'N/A')}", new_x="LMARGIN", new_y="NEXT")
+        
+        pdf.cell(60, 6, f"Mouza: {parcel_info.get('mouza', 'N/A')}")
+        pdf.cell(60, 6, f"Khata No: {parcel_info.get('khata_no', 'N/A')}")
+        pdf.cell(60, 6, f"Plot No: {parcel_info.get('plot_no', plot_no)}", new_x="LMARGIN", new_y="NEXT")
+        
+        area = parcel_info.get('area', 0)
+        pdf.cell(60, 6, f"Total Area: {area/4046.8564:.3f} acres ({area:.1f} sq.m)")
+        pdf.cell(60, 6, f"Lat: {parcel_info.get('lat', 'N/A')}")
+        pdf.cell(60, 6, f"Lon: {parcel_info.get('lon', 'N/A')}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(5)
+    
+    # ---------------------------------------------------------
+    # Section 2: Dashboard Details
+    # ---------------------------------------------------------
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(0, 8, "2. Dashboard Details", new_x="LMARGIN", new_y="NEXT", border="B")
+    pdf.ln(3)
+    
+    pdf.set_font("helvetica", "", 10)
+    if subdivisions:
+        num_partitions = len(subdivisions)
+        shares_str = ", ".join([f"{sub['properties']['share_percentage']:.1f}%" for sub in subdivisions])
+        pdf.cell(0, 6, f"Requested Partitions: {num_partitions}", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, f"Requested Share Percentages: {shares_str}", new_x="LMARGIN", new_y="NEXT")
+    
+    pdf.ln(5)
+    # Visual Map Rendering
     pdf.image(temp_img_path, x=15, w=180)
     pdf.ln(5)
-    
-    # Map Legend
     pdf.set_font("helvetica", 'I', 9)
     pdf.cell(0, 6, "Legend: Red = Parcel Boundary, Yellow = Road Frontage, Green Dot = Tree, Blue Dot = Well", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
     
+    # ---------------------------------------------------------
+    # Section 3: Segregation Details & AI Summary
+    # ---------------------------------------------------------
+    pdf.add_page()
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(0, 8, "3. Segregation Details & Explainable AI Summary", new_x="LMARGIN", new_y="NEXT", border="B")
+    pdf.ln(3)
+    
     if subdivisions:
-        pdf.set_font("helvetica", 'B', 12)
-        pdf.cell(0, 10, "Segregation Details", new_x="LMARGIN", new_y="NEXT")
-        
         pdf.set_font("helvetica", size=10)
         for i, sub in enumerate(subdivisions):
             props = sub['properties']
             pdf.set_font("helvetica", 'B', 10)
             pdf.cell(0, 8, f"Sub-Plot {props['sub_plot_id']} ({props['share_percentage']:.1f}%)", new_x="LMARGIN", new_y="NEXT")
             pdf.set_font("helvetica", size=10)
-            pdf.cell(0, 6, f"Area: {props['area_sqm']/4046.8564:.3f} acres ({props['area_sqm']:.1f} sq.m)", new_x="LMARGIN", new_y="NEXT")
-            pdf.cell(0, 6, f"Perimeter: {props['perimeter_m']:.1f} m", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 6, f"  - Area: {props['area_sqm']/4046.8564:.3f} acres ({props['area_sqm']:.1f} sq.m)", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 6, f"  - Perimeter: {props['perimeter_m']:.1f} m", new_x="LMARGIN", new_y="NEXT")
             if props.get('frontage_m'):
-                pdf.cell(0, 6, f"Road Frontage Extent: {props['frontage_m']:.1f} m", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 6, f"  - Road Frontage Extent: {props['frontage_m']:.1f} m", new_x="LMARGIN", new_y="NEXT")
                 
             feats = props.get('contained_features', [])
             if feats:
                 feat_types = [f['type'].capitalize() for f in feats]
-                pdf.cell(0, 6, f"Features inside plot: {', '.join(feat_types)}", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 6, f"  - Features inside plot: {', '.join(feat_types)}", new_x="LMARGIN", new_y="NEXT")
             else:
-                pdf.cell(0, 6, "Features inside plot: None", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 6, "  - Features inside plot: None", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(3)
+
+    llm_explanation = parcel_info.get("llm_explanation", "") if parcel_info else ""
+    strategy_name = parcel_info.get("strategy_name", "") if parcel_info else ""
+    
+    if llm_explanation and strategy_name:
+        pdf.ln(5)
+        pdf.set_font("helvetica", "B", 11)
+        pdf.cell(0, 8, f"AI Strategy Recommendation: {strategy_name}", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+        
+        pdf.set_font("helvetica", "", 10)
+        pdf.multi_cell(0, 6, llm_explanation.replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"'))
+        pdf.ln(10)
+        
+        pdf.set_font("helvetica", "I", 9)
+        pdf.multi_cell(0, 5, "Disclaimer: This AI summary was dynamically generated in a stateless session utilizing the local LLM running via LM Studio. The model analyzes mathematically precise boundaries and detected visual map context against the UP Revenue Code, 2006.")
 
     os.unlink(temp_img_path)
     return pdf.output()
