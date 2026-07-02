@@ -180,11 +180,12 @@ function initMap() {
     });
 
     // BhuNaksha WMS Village Map layer (transparent overlay)
-    plotLyr = new ol.layer.Image({
+    // BhuNaksha WMS Village Map layer (transparent overlay)
+    plotLyr = new ol.layer.Tile({
         title: "Cadastral Map",
         visible: false,
         opacity: 0.6,
-        source: new ol.source.ImageWMS({
+        source: new ol.source.TileWMS({
             url: "/proxy/WMS",
             params: {
                 "LAYERS": "VILLAGE_MAP",
@@ -199,11 +200,11 @@ function initMap() {
     });
 
     // BhuNaksha WMS Selected Plot Highlight layer
-    selPlotLyr = new ol.layer.Image({
+    selPlotLyr = new ol.layer.Tile({
         title: "Selected Plot",
         visible: false,
         opacity: 0.8,
-        source: new ol.source.ImageWMS({
+        source: new ol.source.TileWMS({
             url: "/proxy/WMS",
             params: {
                 "LAYERS": "PLOT_LIST",
@@ -219,8 +220,8 @@ function initMap() {
         })
     });
 
-    // Custom WMS image load function to apply alignment offsets (visual nudge)
-    const applyBboxOffset = function(image, src) {
+    // Custom WMS tile load function to apply alignment offsets (visual nudge)
+    const applyTileBboxOffset = function(tile, src) {
         if (offsetX !== 0 || offsetY !== 0) {
             try {
                 const url = new URL(src, window.location.href || "http://localhost");
@@ -240,11 +241,11 @@ function initMap() {
                 console.error("Error shifting WMS BBOX:", e);
             }
         }
-        image.getImage().src = src;
+        tile.getImage().src = src;
     };
 
-    plotLyr.getSource().setImageLoadFunction(applyBboxOffset);
-    selPlotLyr.getSource().setImageLoadFunction(applyBboxOffset);
+    plotLyr.getSource().setTileLoadFunction(applyTileBboxOffset);
+    selPlotLyr.getSource().setTileLoadFunction(applyTileBboxOffset);
 
     vectorSource = new ol.source.Vector();
     vectorLayer = new ol.layer.Vector({
@@ -549,9 +550,10 @@ function setupEventListeners() {
             } else {
                 showToast("No parcel found at clicked coordinates", "warning");
             }
-        }, "json").fail(function() {
+        }, "json").fail(function(xhr) {
             showLoading(false);
-            showToast("Failed to query clicked coordinates", "error");
+            const err = xhr.responseJSON ? xhr.responseJSON.error : "Failed to query clicked coordinates";
+            showToast(err, "error");
         });
     });
 
@@ -575,6 +577,63 @@ function setupEventListeners() {
         // Open download link in a new tab
         window.open(downloadUrl, "_blank");
         showToast("Scraping high-resolution WMS image...", "success");
+    });
+
+    // Clone / Download Vector Sheet Data (GeoJSON)
+    $("#btn-clone-sheet").click(function() {
+        if (!currentGisCode || !currentLevels) {
+            showToast("Please select a map sheet to scrape", "warning");
+            return;
+        }
+
+        const gridStep = 35.0; // 35 meter spacing is standard
+        const batchSize = 65;  // process 65 grid points per batch
+        let currentBatch = 0;
+        
+        function runBatch() {
+            showLoading(true, `Cloning vector data: Batch ${currentBatch + 1} in progress...`);
+            $.ajax({
+                url: "/api/sheet/scrape_batch",
+                type: "POST",
+                contentType: "application/json",
+                data: JSON.stringify({
+                    state: stateCode,
+                    giscode: currentGisCode,
+                    levels: currentLevels,
+                    batch_index: currentBatch,
+                    batch_size: batchSize,
+                    grid_step: gridStep
+                }),
+                success: function(res) {
+                    if (res.success) {
+                        const totalScanned = currentBatch * batchSize + res.scanned_points_in_batch;
+                        const pct = Math.min(100, Math.round((totalScanned / res.total_points) * 100));
+                        showToast(`Scraped batch ${currentBatch + 1} (${pct}%). Found ${res.new_plots_found.length} new plots. Total plots saved: ${res.total_plots_saved}`, "success");
+                        
+                        if (res.is_done) {
+                            showLoading(true, "Compiling GeoJSON features for download...");
+                            // All batches done! Redirect to export GeoJSON
+                            window.location.href = `/api/sheet/export_geojson?state=${stateCode}&levels=${encodeURIComponent(currentLevels)}`;
+                            showLoading(false);
+                            showToast("Sheet vector clone download initiated successfully!", "success");
+                        } else {
+                            currentBatch++;
+                            runBatch(); // trigger next batch
+                        }
+                    } else {
+                        showLoading(false);
+                        showToast("Batch scraping failed: " + (res.error || "Unknown error"), "error");
+                    }
+                },
+                error: function(xhr, status, error) {
+                    showLoading(false);
+                    showToast("Error processing batch scrape: " + error, "error");
+                }
+            });
+        }
+        
+        // Start the batch scraping process
+        runBatch();
     });
     
     // Kurra Division Event Listeners
